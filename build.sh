@@ -24,6 +24,8 @@ ARMBIAN_CACHE_DIR=""
 ARMBIAN_IMG_XZ=""
 ARMBIAN_IMG=""
 ARMBIAN_BOOT_MNT=""
+ASSET_KERNEL_NAME="Image"
+ASSET_INITRD_NAME="uInitrd"
 
 log() {
   echo "[${SCRIPT_NAME}] $*"
@@ -291,33 +293,71 @@ extract_armbian_assets() {
   fi
   LOOP_ARMBIAN=$(losetup -Pf --show "${ARMBIAN_IMG}")
   log "Armbian loop: ${LOOP_ARMBIAN}"
-  local boot_part="${LOOP_ARMBIAN}p1"
-  ARMBIAN_BOOT_MNT="${WORKDIR_CREATED}/armbian-boot"
-  mkdir -p "${ARMBIAN_BOOT_MNT}"
-  mount "${boot_part}" "${ARMBIAN_BOOT_MNT}"
 
-  local kernel_path
-  kernel_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 6 -type f -name "Image" | head -n1 || true)
-  if [[ -z "${kernel_path}" ]]; then
-    echo "未找到内核文件 Image，启动分区结构可能已变化。"
+  local armbian_parts=()
+  local p
+  for p in "${LOOP_ARMBIAN}"p*; do
+    if [[ -e "${p}" ]]; then
+      armbian_parts+=("${p}")
+    fi
+  done
+  if [[ "${#armbian_parts[@]}" -eq 0 ]]; then
+    echo "未找到 Armbian 镜像分区: ${LOOP_ARMBIAN}p*"
     exit 1
   fi
-  cp "${kernel_path}" "${ASSETS_DIR}/Image"
+
+  ARMBIAN_BOOT_MNT="${WORKDIR_CREATED}/armbian-boot"
+  mkdir -p "${ARMBIAN_BOOT_MNT}"
+
+  local selected_part=""
+  local dtb_found=""
+  for p in "${armbian_parts[@]}"; do
+    if ! mount -o ro "${p}" "${ARMBIAN_BOOT_MNT}" 2>/dev/null; then
+      continue
+    fi
+    dtb_found=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
+    if [[ -n "${dtb_found}" ]]; then
+      selected_part="${p}"
+      break
+    fi
+    umount "${ARMBIAN_BOOT_MNT}" || true
+  done
+
+  if [[ -z "${selected_part}" ]]; then
+    echo "未在 Armbian 各分区中找到 DTB: sun50i-h616-orangepi-zero2.dtb"
+    exit 1
+  fi
+  log "使用分区提取启动资产: ${selected_part}"
+
+  local kernel_path
+  kernel_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "Image" | head -n1 || true)
+  if [[ -z "${kernel_path}" ]]; then
+    kernel_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "Image-*" | head -n1 || true)
+  fi
+  if [[ -z "${kernel_path}" ]]; then
+    kernel_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "vmlinuz*" | head -n1 || true)
+  fi
+  if [[ -z "${kernel_path}" ]]; then
+    kernel_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "zImage*" | head -n1 || true)
+  fi
+  if [[ -z "${kernel_path}" ]]; then
+    echo "未找到内核文件（Image/Image-*/vmlinuz*/zImage*），启动分区结构可能已变化。"
+    exit 1
+  fi
+  ASSET_KERNEL_NAME=$(basename "${kernel_path}")
+  cp "${kernel_path}" "${ASSETS_DIR}/${ASSET_KERNEL_NAME}"
 
   local initrd_path
-  initrd_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 6 -type f \( -name "uInitrd" -o -name "initrd.img*" \) | head -n1 || true)
+  initrd_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "uInitrd" | head -n1 || true)
+  if [[ -z "${initrd_path}" ]]; then
+    initrd_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "initrd.img*" | head -n1 || true)
+  fi
   if [[ -z "${initrd_path}" ]]; then
     echo "未找到 initrd（uInitrd 或 initrd.img*）"
     exit 1
   fi
-  cp "${initrd_path}" "${ASSETS_DIR}/uInitrd"
-
-  local dtb_found
-  dtb_found=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 8 -type f -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
-  if [[ -z "${dtb_found}" ]]; then
-    echo "未找到 DTB: sun50i-h616-orangepi-zero2.dtb"
-    exit 1
-  fi
+  ASSET_INITRD_NAME=$(basename "${initrd_path}")
+  cp "${initrd_path}" "${ASSETS_DIR}/${ASSET_INITRD_NAME}"
 
   local dtb_src_dir
   dtb_src_dir=$(dirname "${dtb_found}")
@@ -496,18 +536,18 @@ EOF
 
 install_boot_assets() {
   log "安装 boot 资产"
-  cp "${ASSETS_DIR}/Image" "${MNT_BOOT}/Image"
+  cp "${ASSETS_DIR}/${ASSET_KERNEL_NAME}" "${MNT_BOOT}/${ASSET_KERNEL_NAME}"
   mkdir -p "${MNT_BOOT}/dtb"
   rsync -a "${ASSETS_DIR}/dtb/" "${MNT_BOOT}/dtb/"
-  cp "${ASSETS_DIR}/uInitrd" "${MNT_BOOT}/uInitrd"
+  cp "${ASSETS_DIR}/${ASSET_INITRD_NAME}" "${MNT_BOOT}/${ASSET_INITRD_NAME}"
   mkdir -p "${MNT_BOOT}/extlinux"
   local dtb_rel
   dtb_rel=$(find "${ASSETS_DIR}/dtb" -name "sun50i-h616-orangepi-zero2.dtb" | head -n1)
   dtb_rel=${dtb_rel#"${ASSETS_DIR}/dtb/"}
   cat <<EOF > "${MNT_BOOT}/extlinux/extlinux.conf"
 LABEL DebianTrixie
-  LINUX /Image
-  INITRD /uInitrd
+  LINUX /${ASSET_KERNEL_NAME}
+  INITRD /${ASSET_INITRD_NAME}
   FDT /dtb/${dtb_rel}
   APPEND root=/dev/mmcblk0p2 rootfstype=btrfs rootwait rw console=ttyS0,115200 console=tty1
 EOF
@@ -521,8 +561,8 @@ install_uboot_to_output_image() {
 finalize_image() {
   sync
   log "检查生成结果"
-  if [[ ! -f "${MNT_ROOT}/boot/Image" ]]; then
-    echo "校验失败: /boot/Image 不存在"
+  if [[ ! -f "${MNT_ROOT}/boot/${ASSET_KERNEL_NAME}" ]]; then
+    echo "校验失败: /boot/${ASSET_KERNEL_NAME} 不存在"
     exit 1
   fi
   if [[ ! -f "${MNT_ROOT}/boot/extlinux/extlinux.conf" ]]; then
