@@ -23,6 +23,7 @@ ASSETS_DIR=""
 ARMBIAN_CACHE_DIR=""
 ARMBIAN_IMG_XZ=""
 ARMBIAN_IMG=""
+ARMBIAN_BOOT_MNT=""
 
 log() {
   echo "[${SCRIPT_NAME}] $*"
@@ -30,6 +31,12 @@ log() {
 
 cleanup() {
   set +e
+  if [[ -n "${ARMBIAN_BOOT_MNT}" ]] && mountpoint -q "${ARMBIAN_BOOT_MNT}"; then
+    umount -lf "${ARMBIAN_BOOT_MNT}"
+  fi
+  if [[ -n "${ARMBIAN_BOOT_MNT}" && -d "${ARMBIAN_BOOT_MNT}" ]]; then
+    rmdir "${ARMBIAN_BOOT_MNT}" || true
+  fi
   if [[ -n "${MNT_BOOT}" ]] && mountpoint -q "${MNT_BOOT}"; then
     umount -lf "${MNT_BOOT}"
   fi
@@ -285,34 +292,48 @@ extract_armbian_assets() {
   LOOP_ARMBIAN=$(losetup -Pf --show "${ARMBIAN_IMG}")
   log "Armbian loop: ${LOOP_ARMBIAN}"
   local boot_part="${LOOP_ARMBIAN}p1"
-  local armbian_boot="${WORKDIR_CREATED}/armbian-boot"
-  mkdir -p "${armbian_boot}"
-  mount "${boot_part}" "${armbian_boot}"
+  ARMBIAN_BOOT_MNT="${WORKDIR_CREATED}/armbian-boot"
+  mkdir -p "${ARMBIAN_BOOT_MNT}"
+  mount "${boot_part}" "${ARMBIAN_BOOT_MNT}"
+
+  local kernel_path
+  kernel_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 6 -type f -name "Image" | head -n1 || true)
+  if [[ -z "${kernel_path}" ]]; then
+    echo "未找到内核文件 Image，启动分区结构可能已变化。"
+    exit 1
+  fi
+  cp "${kernel_path}" "${ASSETS_DIR}/Image"
+
+  local initrd_path
+  initrd_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 6 -type f \( -name "uInitrd" -o -name "initrd.img*" \) | head -n1 || true)
+  if [[ -z "${initrd_path}" ]]; then
+    echo "未找到 initrd（uInitrd 或 initrd.img*）"
+    exit 1
+  fi
+  cp "${initrd_path}" "${ASSETS_DIR}/uInitrd"
+
+  local dtb_found
+  dtb_found=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 8 -type f -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
+  if [[ -z "${dtb_found}" ]]; then
+    echo "未找到 DTB: sun50i-h616-orangepi-zero2.dtb"
+    exit 1
+  fi
+
+  local dtb_src_dir
+  dtb_src_dir=$(dirname "${dtb_found}")
+  while [[ "${dtb_src_dir}" != "/" && "$(basename "${dtb_src_dir}")" != "dtb" ]]; do
+    dtb_src_dir=$(dirname "${dtb_src_dir}")
+  done
+  if [[ "${dtb_src_dir}" == "/" ]]; then
+    dtb_src_dir=$(dirname "${dtb_found}")
+  fi
   mkdir -p "${ASSETS_DIR}/dtb"
-  cp "${armbian_boot}/Image" "${ASSETS_DIR}/Image"
-  rsync -a "${armbian_boot}/dtb/" "${ASSETS_DIR}/dtb/"
-  if [[ -f "${armbian_boot}/uInitrd" ]]; then
-    cp "${armbian_boot}/uInitrd" "${ASSETS_DIR}/uInitrd"
-  else
-    local initrd
-    initrd=$(ls "${armbian_boot}"/initrd.img* 2>/dev/null | head -n1 || true)
-    if [[ -z "${initrd}" ]]; then
-      echo "未找到 initrd"
-      exit 1
-    fi
-    cp "${initrd}" "${ASSETS_DIR}/uInitrd"
-  fi
-  if [[ ! -f "${ASSETS_DIR}/dtb/sun50i-h616-orangepi-zero2.dtb" ]]; then
-    local dtb_found
-    dtb_found=$(find "${ASSETS_DIR}/dtb" -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
-    if [[ -z "${dtb_found}" ]]; then
-      echo "未找到 DTB: sun50i-h616-orangepi-zero2.dtb"
-      exit 1
-    fi
-  fi
+  rsync -a "${dtb_src_dir}/" "${ASSETS_DIR}/dtb/"
+
   dd if="${ARMBIAN_IMG}" of="${ASSETS_DIR}/uboot.bin" bs=1M count=16
-  umount "${armbian_boot}"
-  rmdir "${armbian_boot}"
+  umount "${ARMBIAN_BOOT_MNT}"
+  rmdir "${ARMBIAN_BOOT_MNT}"
+  ARMBIAN_BOOT_MNT=""
   losetup -d "${LOOP_ARMBIAN}"
   LOOP_ARMBIAN=""
 }
