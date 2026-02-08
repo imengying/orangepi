@@ -1,0 +1,554 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_NAME=$(basename "$0")
+
+IMAGE_SIZE="4G"
+SUITE="trixie"
+ARCH="arm64"
+HOSTNAME="orangepi-zero2"
+MIRROR="http://mirrors.ustc.edu.cn/debian"
+OUTPUT="$(pwd)/orangepi-zero2-debian13-trixie-btrfs.img"
+COMPRESS="xz"
+WORKDIR=""
+ARMBIAN_URL="https://dl.armbian.com/orangepizero2/Bookworm_current_minimal"
+ROOT_PASS=""
+ROOT_PASS_HASH=""
+
+LOOP_OUTPUT=""
+LOOP_ARMBIAN=""
+WORKDIR_CREATED=""
+MNT_ROOT=""
+MNT_BOOT=""
+ASSETS_DIR=""
+ARMBIAN_CACHE_DIR=""
+ARMBIAN_IMG_XZ=""
+ARMBIAN_IMG=""
+
+log() {
+  echo "[${SCRIPT_NAME}] $*"
+}
+
+usage() {
+  cat <<USAGE
+用法: ${SCRIPT_NAME} [选项]
+
+选项:
+  --image-size SIZE       镜像大小 (默认: 4G)
+  --suite SUITE           Debian 发行版代号 (默认: trixie)
+  --arch ARCH             架构 (默认: arm64)
+  --hostname HOSTNAME     主机名 (默认: orangepi-zero2)
+  --mirror MIRROR         Debian 镜像源 (默认: http://mirrors.ustc.edu.cn/debian)
+  --output PATH           输出镜像路径 (默认: ./orangepi-zero2-debian13-trixie-btrfs.img)
+  --compress xz|none      是否压缩 (默认: xz)
+  --workdir DIR           工作目录 (默认: /tmp/opi-build-XXXX)
+  --armbian-url URL       Armbian 下载链接 (默认: https://dl.armbian.com/orangepizero2/Bookworm_current_minimal)
+  --root-pass PASS        root 明文密码 (可选)
+  --root-pass-hash HASH   root 密码 hash (优先)
+  -h, --help              显示帮助
+
+示例:
+  sudo ${SCRIPT_NAME} --image-size 6G --compress none
+USAGE
+}
+
+cleanup() {
+  set +e
+  if mountpoint -q "${MNT_BOOT}"; then
+    umount -lf "${MNT_BOOT}"
+  fi
+  if mountpoint -q "${MNT_ROOT}/dev"; then
+    umount -lf "${MNT_ROOT}/dev"
+  fi
+  if mountpoint -q "${MNT_ROOT}/proc"; then
+    umount -lf "${MNT_ROOT}/proc"
+  fi
+  if mountpoint -q "${MNT_ROOT}/sys"; then
+    umount -lf "${MNT_ROOT}/sys"
+  fi
+  if mountpoint -q "${MNT_ROOT}"; then
+    umount -lf "${MNT_ROOT}"
+  fi
+  if [[ -n "${LOOP_OUTPUT}" ]]; then
+    losetup -d "${LOOP_OUTPUT}" || true
+  fi
+  if [[ -n "${LOOP_ARMBIAN}" ]]; then
+    losetup -d "${LOOP_ARMBIAN}" || true
+  fi
+  if [[ -n "${WORKDIR_CREATED}" && -d "${WORKDIR_CREATED}" ]]; then
+    rm -rf "${WORKDIR_CREATED}" || true
+  fi
+}
+
+trap cleanup EXIT ERR
+
+require_root() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "请使用 root 权限运行。"
+    exit 1
+  fi
+}
+
+check_deps() {
+  local deps=(
+    debootstrap qemu-aarch64-static parted losetup mkfs.vfat mkfs.btrfs mount rsync wget curl xz chroot lsblk
+  )
+  local missing=()
+  for d in "${deps[@]}"; do
+    if ! command -v "${d}" >/dev/null 2>&1; then
+      missing+=("${d}")
+    fi
+  done
+  if [[ "${#missing[@]}" -ne 0 ]]; then
+    echo "缺少依赖: ${missing[*]}"
+    exit 1
+  fi
+}
+
+parse_args() {
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --image-size)
+        IMAGE_SIZE="$2"
+        shift 2
+        ;;
+      --suite)
+        SUITE="$2"
+        shift 2
+        ;;
+      --arch)
+        ARCH="$2"
+        shift 2
+        ;;
+      --hostname)
+        HOSTNAME="$2"
+        shift 2
+        ;;
+      --mirror)
+        MIRROR="$2"
+        shift 2
+        ;;
+      --output)
+        OUTPUT="$2"
+        shift 2
+        ;;
+      --compress)
+        COMPRESS="$2"
+        shift 2
+        ;;
+      --workdir)
+        WORKDIR="$2"
+        shift 2
+        ;;
+      --armbian-url)
+        ARMBIAN_URL="$2"
+        shift 2
+        ;;
+      --root-pass)
+        ROOT_PASS="$2"
+        shift 2
+        ;;
+      --root-pass-hash)
+        ROOT_PASS_HASH="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "未知参数: $1"
+        usage
+        exit 1
+        ;;
+    esac
+  done
+}
+
+init_workdir() {
+  if [[ -n "${WORKDIR}" ]]; then
+    WORKDIR_CREATED="${WORKDIR}"
+    mkdir -p "${WORKDIR_CREATED}"
+  else
+    WORKDIR_CREATED=$(mktemp -d /tmp/opi-build-XXXX)
+  fi
+  ASSETS_DIR="${WORKDIR_CREATED}/assets"
+  ARMBIAN_CACHE_DIR="${WORKDIR_CREATED}/cache"
+  MNT_ROOT="${WORKDIR_CREATED}/rootfs"
+  MNT_BOOT="${WORKDIR_CREATED}/rootfs/boot"
+  mkdir -p "${ASSETS_DIR}" "${ARMBIAN_CACHE_DIR}" "${MNT_ROOT}"
+  log "工作目录: ${WORKDIR_CREATED}"
+}
+
+read_root_password() {
+  if [[ -n "${ROOT_PASS_HASH}" ]]; then
+    return
+  fi
+  if [[ -z "${ROOT_PASS}" ]]; then
+    while true; do
+      read -r -s -p "请输入 root 密码: " pass1
+      echo
+      read -r -s -p "请再次输入 root 密码: " pass2
+      echo
+      if [[ "${pass1}" == "${pass2}" && -n "${pass1}" ]]; then
+        ROOT_PASS="${pass1}"
+        break
+      else
+        echo "两次输入不一致或为空，请重试。"
+      fi
+    done
+  fi
+}
+
+require_tools_for_download() {
+  if command -v curl >/dev/null 2>&1; then
+    return
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    return
+  fi
+  echo "缺少下载工具: curl 或 wget"
+  exit 1
+}
+
+download_armbian_minimal() {
+  require_tools_for_download
+  log "下载 Armbian 资产: ${ARMBIAN_URL}"
+
+  local resolved_url="${ARMBIAN_URL}"
+  if [[ ! "${ARMBIAN_URL}" =~ \.img\.xz$ ]]; then
+    log "解析 Armbian 下载页面，查找 .img.xz"
+    local page_content=""
+    if command -v curl >/dev/null 2>&1; then
+      page_content=$(curl -L "${ARMBIAN_URL}")
+    else
+      page_content=$(wget -qO- "${ARMBIAN_URL}")
+    fi
+    resolved_url=$(echo "${page_content}" | grep -oE 'https?://[^"]+\.img\.xz' | head -n1 || true)
+    if [[ -z "${resolved_url}" ]]; then
+      local href
+      href=$(echo "${page_content}" | grep -oE 'href=\"[^"]+\.img\.xz\"' | head -n1 | cut -d'"' -f2 || true)
+      if [[ -n "${href}" ]]; then
+        if [[ "${href}" =~ ^https?:// ]]; then
+          resolved_url="${href}"
+        else
+          resolved_url="${ARMBIAN_URL%/}/${href}"
+        fi
+      fi
+    fi
+  fi
+
+  if [[ -z "${resolved_url}" || ! "${resolved_url}" =~ \.img\.xz$ ]]; then
+    echo "无法解析 Armbian 镜像下载地址，请检查 --armbian-url"
+    exit 1
+  fi
+
+  local file_name
+  file_name=$(basename "${resolved_url}")
+  ARMBIAN_IMG_XZ="${ARMBIAN_CACHE_DIR}/${file_name}"
+  if [[ -f "${ARMBIAN_IMG_XZ}" ]]; then
+    log "使用缓存: ${ARMBIAN_IMG_XZ}"
+    return
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    curl -L "${resolved_url}" -o "${ARMBIAN_IMG_XZ}"
+  else
+    wget -O "${ARMBIAN_IMG_XZ}" "${resolved_url}"
+  fi
+}
+
+extract_armbian_assets() {
+  log "解压 Armbian 镜像"
+  ARMBIAN_IMG="${ARMBIAN_CACHE_DIR}/armbian.img"
+  if [[ ! -f "${ARMBIAN_IMG}" ]]; then
+    xz -dkc "${ARMBIAN_IMG_XZ}" > "${ARMBIAN_IMG}"
+  fi
+  LOOP_ARMBIAN=$(losetup -Pf --show "${ARMBIAN_IMG}")
+  log "Armbian loop: ${LOOP_ARMBIAN}"
+  local boot_part="${LOOP_ARMBIAN}p1"
+  local armbian_boot="${WORKDIR_CREATED}/armbian-boot"
+  mkdir -p "${armbian_boot}"
+  mount "${boot_part}" "${armbian_boot}"
+  mkdir -p "${ASSETS_DIR}/dtb"
+  cp "${armbian_boot}/Image" "${ASSETS_DIR}/Image"
+  rsync -a "${armbian_boot}/dtb/" "${ASSETS_DIR}/dtb/"
+  if [[ -f "${armbian_boot}/uInitrd" ]]; then
+    cp "${armbian_boot}/uInitrd" "${ASSETS_DIR}/uInitrd"
+  else
+    local initrd
+    initrd=$(ls "${armbian_boot}"/initrd.img* 2>/dev/null | head -n1 || true)
+    if [[ -z "${initrd}" ]]; then
+      echo "未找到 initrd"
+      exit 1
+    fi
+    cp "${initrd}" "${ASSETS_DIR}/uInitrd"
+  fi
+  if [[ ! -f "${ASSETS_DIR}/dtb/sun50i-h616-orangepi-zero2.dtb" ]]; then
+    local dtb_found
+    dtb_found=$(find "${ASSETS_DIR}/dtb" -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
+    if [[ -z "${dtb_found}" ]]; then
+      echo "未找到 DTB: sun50i-h616-orangepi-zero2.dtb"
+      exit 1
+    fi
+  fi
+  dd if="${ARMBIAN_IMG}" of="${ASSETS_DIR}/uboot.bin" bs=1M count=16
+  umount "${armbian_boot}"
+  rmdir "${armbian_boot}"
+  losetup -d "${LOOP_ARMBIAN}"
+  LOOP_ARMBIAN=""
+}
+
+create_blank_image() {
+  log "创建镜像: ${OUTPUT}"
+  truncate -s "${IMAGE_SIZE}" "${OUTPUT}"
+  parted -s "${OUTPUT}" mklabel msdos
+  parted -s "${OUTPUT}" mkpart primary fat32 1MiB 513MiB
+  parted -s "${OUTPUT}" set 1 boot on
+  parted -s "${OUTPUT}" mkpart primary btrfs 513MiB 100%
+  log "分区信息:"
+  lsblk -o NAME,SIZE,TYPE "${OUTPUT}" || true
+}
+
+setup_loop_for_output_image() {
+  LOOP_OUTPUT=$(losetup -Pf --show "${OUTPUT}")
+  log "输出 loop: ${LOOP_OUTPUT}"
+  lsblk "${LOOP_OUTPUT}" || true
+}
+
+format_partitions() {
+  mkfs.vfat -F32 -n BOOT "${LOOP_OUTPUT}p1"
+  mkfs.btrfs -f -L ROOT "${LOOP_OUTPUT}p2"
+}
+
+mount_partitions() {
+  mount -o compress=zstd:3,noatime "${LOOP_OUTPUT}p2" "${MNT_ROOT}"
+  mkdir -p "${MNT_BOOT}"
+  mount "${LOOP_OUTPUT}p1" "${MNT_BOOT}"
+}
+
+prepare_dns() {
+  if [[ -f /etc/resolv.conf ]]; then
+    cp /etc/resolv.conf "${MNT_ROOT}/etc/resolv.conf"
+  else
+    echo "nameserver 1.1.1.1" > "${MNT_ROOT}/etc/resolv.conf"
+  fi
+}
+
+build_debian_rootfs() {
+  log "debootstrap 构建 rootfs"
+  debootstrap --arch="${ARCH}" "${SUITE}" "${MNT_ROOT}" "${MIRROR}"
+  cp "$(command -v qemu-aarch64-static)" "${MNT_ROOT}/usr/bin/"
+  mount --bind /dev "${MNT_ROOT}/dev"
+  mount --bind /proc "${MNT_ROOT}/proc"
+  mount --bind /sys "${MNT_ROOT}/sys"
+  prepare_dns
+}
+
+write_resize_script() {
+  cat <<'SCRIPT' > "${MNT_ROOT}/usr/local/sbin/opi-firstboot-resize.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+DONE_FILE="/var/lib/opi-firstboot-resize.done"
+LOG_PREFIX="[opi-firstboot-resize]"
+
+log() {
+  echo "${LOG_PREFIX} $*"
+}
+
+if [[ -f "${DONE_FILE}" ]]; then
+  log "已完成，退出。"
+  exit 0
+fi
+
+log "开始扩容 /dev/mmcblk0p2"
+if command -v sfdisk >/dev/null 2>&1; then
+  log "使用 sfdisk 扩展分区"
+  start_sector=$(sfdisk -d /dev/mmcblk0 | awk '/^\/dev\/mmcblk0p2/ {print $4}' | tr -d ',')
+  if [[ -n "${start_sector}" ]]; then
+    printf ',,L,\n' | sfdisk -N2 /dev/mmcblk0
+  fi
+else
+  log "使用 parted 扩展分区"
+  parted -s /dev/mmcblk0 resizepart 2 100%
+fi
+
+log "刷新分区表"
+if command -v partprobe >/dev/null 2>&1; then
+  partprobe /dev/mmcblk0 || true
+else
+  blockdev --rereadpt /dev/mmcblk0 || true
+fi
+
+sleep 2
+
+new_size=$(blockdev --getsz /dev/mmcblk0p2 || echo 0)
+log "分区扇区数: ${new_size}"
+
+log "尝试扩容 btrfs"
+if btrfs filesystem resize max /; then
+  log "btrfs 扩容成功"
+  touch "${DONE_FILE}"
+  systemctl disable --now opi-firstboot-resize.service || true
+  exit 0
+fi
+
+log "btrfs 扩容未完成，尝试重启后继续"
+if ! systemctl reboot; then
+  log "重启失败，稍后手动处理"
+fi
+exit 0
+SCRIPT
+  chmod +x "${MNT_ROOT}/usr/local/sbin/opi-firstboot-resize.sh"
+
+  cat <<'SERVICE' > "${MNT_ROOT}/etc/systemd/system/opi-firstboot-resize.service"
+[Unit]
+Description=Orange Pi first boot resize
+After=local-fs.target
+Before=multi-user.target
+ConditionPathExists=!/var/lib/opi-firstboot-resize.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/opi-firstboot-resize.sh
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+}
+
+configure_rootfs_in_chroot() {
+  log "配置 rootfs"
+  cat <<EOF > "${MNT_ROOT}/etc/hostname"
+${HOSTNAME}
+EOF
+  cat <<EOF > "${MNT_ROOT}/etc/hosts"
+127.0.0.1\tlocalhost
+127.0.1.1\t${HOSTNAME}
+EOF
+
+  cat <<EOF > "${MNT_ROOT}/etc/apt/sources.list"
+deb ${MIRROR} ${SUITE} main contrib non-free non-free-firmware
+deb ${MIRROR}-security ${SUITE}-security main contrib non-free non-free-firmware
+deb ${MIRROR} ${SUITE}-updates main contrib non-free non-free-firmware
+EOF
+
+  chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
+  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted util-linux"
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
+
+  mkdir -p "${MNT_ROOT}/etc/ssh/sshd_config.d"
+  cat <<'EOF' > "${MNT_ROOT}/etc/ssh/sshd_config.d/99-root-login.conf"
+PermitRootLogin yes
+PasswordAuthentication yes
+EOF
+
+  if [[ -n "${ROOT_PASS_HASH}" ]]; then
+    chroot "${MNT_ROOT}" /bin/bash -c "usermod -p '${ROOT_PASS_HASH}' root"
+  else
+    echo "root:${ROOT_PASS}" | chroot "${MNT_ROOT}" chpasswd
+  fi
+
+  cat <<'EOF' > "${MNT_ROOT}/etc/fstab"
+/dev/mmcblk0p2 / btrfs defaults,compress=zstd:3,noatime 0 1
+/dev/mmcblk0p1 /boot vfat defaults 0 2
+EOF
+
+  write_resize_script
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable opi-firstboot-resize.service"
+}
+
+install_boot_assets() {
+  log "安装 boot 资产"
+  cp "${ASSETS_DIR}/Image" "${MNT_BOOT}/Image"
+  mkdir -p "${MNT_BOOT}/dtb"
+  rsync -a "${ASSETS_DIR}/dtb/" "${MNT_BOOT}/dtb/"
+  cp "${ASSETS_DIR}/uInitrd" "${MNT_BOOT}/uInitrd"
+  mkdir -p "${MNT_BOOT}/extlinux"
+  local dtb_rel
+  dtb_rel=$(find "${ASSETS_DIR}/dtb" -name "sun50i-h616-orangepi-zero2.dtb" | head -n1)
+  dtb_rel=${dtb_rel#"${ASSETS_DIR}/dtb/"}
+  cat <<EOF > "${MNT_BOOT}/extlinux/extlinux.conf"
+LABEL DebianTrixie
+  LINUX /Image
+  INITRD /uInitrd
+  FDT /dtb/${dtb_rel}
+  APPEND root=/dev/mmcblk0p2 rootfstype=btrfs rootwait rw console=ttyS0,115200 console=tty1
+EOF
+}
+
+install_uboot_to_output_image() {
+  log "写入 U-Boot"
+  dd if="${ASSETS_DIR}/uboot.bin" of="${LOOP_OUTPUT}" bs=1M conv=fsync
+}
+
+finalize_image() {
+  sync
+  log "检查生成结果"
+  if [[ ! -f "${MNT_ROOT}/boot/Image" ]]; then
+    echo "校验失败: /boot/Image 不存在"
+    exit 1
+  fi
+  if [[ ! -f "${MNT_ROOT}/boot/extlinux/extlinux.conf" ]]; then
+    echo "校验失败: extlinux.conf 不存在"
+    exit 1
+  fi
+  if [[ ! -f "${MNT_ROOT}/etc/os-release" ]]; then
+    echo "校验失败: /etc/os-release 不存在"
+    exit 1
+  fi
+  log "校验通过"
+
+  log "卸载并释放资源"
+  umount -lf "${MNT_BOOT}"
+  umount -lf "${MNT_ROOT}/dev" || true
+  umount -lf "${MNT_ROOT}/proc" || true
+  umount -lf "${MNT_ROOT}/sys" || true
+  umount -lf "${MNT_ROOT}"
+  losetup -d "${LOOP_OUTPUT}"
+  LOOP_OUTPUT=""
+}
+
+compress_output() {
+  if [[ "${COMPRESS}" == "xz" ]]; then
+    log "压缩镜像"
+    xz -T0 -z -9 "${OUTPUT}"
+  fi
+}
+
+print_flash_hint() {
+  local out_file="${OUTPUT}"
+  if [[ "${COMPRESS}" == "xz" ]]; then
+    out_file="${OUTPUT}.xz"
+  fi
+  cat <<EOF
+镜像生成完成: ${out_file}
+
+烧录示例:
+  xz -d ${out_file}
+  sudo dd if=${OUTPUT} of=/dev/sdX bs=4M conv=fsync status=progress
+EOF
+}
+
+main() {
+  parse_args "$@"
+  require_root
+  check_deps
+  init_workdir
+  read_root_password
+  download_armbian_minimal
+  extract_armbian_assets
+  create_blank_image
+  setup_loop_for_output_image
+  format_partitions
+  mount_partitions
+  build_debian_rootfs
+  configure_rootfs_in_chroot
+  install_boot_assets
+  install_uboot_to_output_image
+  finalize_image
+  compress_output
+  print_flash_hint
+}
+
+main "$@"
