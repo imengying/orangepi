@@ -227,6 +227,33 @@ download_armbian_minimal() {
 
   local resolved_url="${ARMBIAN_URL}"
   local final_url=""
+  local direct_file="${ARMBIAN_CACHE_DIR}/armbian.img.xz"
+
+  if [[ ! "${resolved_url}" =~ \.img\.xz($|[?#]) ]]; then
+    if [[ -f "${direct_file}" ]] && xz -t "${direct_file}" >/dev/null 2>&1; then
+      ARMBIAN_IMG_XZ="${direct_file}"
+      log "使用缓存: ${ARMBIAN_IMG_XZ}"
+      return
+    fi
+
+    log "尝试将下载链接直接作为镜像文件处理"
+    if command -v curl >/dev/null 2>&1; then
+      if curl -fL "${ARMBIAN_URL}" -o "${direct_file}"; then
+        if xz -t "${direct_file}" >/dev/null 2>&1; then
+          ARMBIAN_IMG_XZ="${direct_file}"
+          return
+        fi
+      fi
+    else
+      if wget -O "${direct_file}" "${ARMBIAN_URL}"; then
+        if xz -t "${direct_file}" >/dev/null 2>&1; then
+          ARMBIAN_IMG_XZ="${direct_file}"
+          return
+        fi
+      fi
+    fi
+    rm -f "${direct_file}"
+  fi
 
   if [[ ! "${resolved_url}" =~ \.img\.xz($|[?#]) ]]; then
     if command -v curl >/dev/null 2>&1; then
@@ -248,16 +275,23 @@ download_armbian_minimal() {
     else
       wget -qO "${page_file}" "${ARMBIAN_URL}"
     fi
-    resolved_url=$(grep -aoE 'https?://[^"[:space:]]+\.img\.xz' "${page_file}" | head -n1 || true)
+    resolved_url=$(grep -aoE 'https?://[^"'\''[:space:]]+\.img\.xz([?#][^"'\''[:space:]]*)?' "${page_file}" | head -n1 || true)
     if [[ -z "${resolved_url}" ]]; then
       local href
-      href=$(grep -aoE 'href=\"[^\"]+\.img\.xz\"' "${page_file}" | head -n1 | cut -d'"' -f2 || true)
+      href=$(grep -aoE "href=['\"][^'\"]+\\.img\\.xz([?#][^'\"]*)?['\"]" "${page_file}" | head -n1 | sed -E "s/^href=['\"]//; s/['\"]$//" || true)
       if [[ -n "${href}" ]]; then
         if [[ "${href}" =~ ^https?:// ]]; then
           resolved_url="${href}"
         else
           resolved_url="${ARMBIAN_URL%/}/${href}"
         fi
+      fi
+    fi
+    if [[ -z "${resolved_url}" ]]; then
+      local token
+      token=$(grep -aoE '[A-Za-z0-9._/-]+\.img\.xz([?#][A-Za-z0-9._=&%-]+)?' "${page_file}" | head -n1 || true)
+      if [[ -n "${token}" ]]; then
+        resolved_url="${ARMBIAN_URL%/}/${token#./}"
       fi
     fi
     rm -f "${page_file}"
@@ -282,6 +316,10 @@ download_armbian_minimal() {
     curl -fL "${resolved_url}" -o "${ARMBIAN_IMG_XZ}"
   else
     wget -O "${ARMBIAN_IMG_XZ}" "${resolved_url}"
+  fi
+  if ! xz -t "${ARMBIAN_IMG_XZ}" >/dev/null 2>&1; then
+    echo "下载文件不是有效的 .xz 镜像，请检查 --armbian-url"
+    exit 1
   fi
 }
 
