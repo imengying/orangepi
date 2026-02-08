@@ -11,7 +11,7 @@ MIRROR="http://mirrors.ustc.edu.cn/debian"
 OUTPUT="$(pwd)/orangepi-zero2-debian13-trixie-btrfs.img"
 COMPRESS="xz"
 WORKDIR=""
-ARMBIAN_URL="https://dl.armbian.com/orangepizero2/Bookworm_current_minimal"
+ARMBIAN_URL="https://dl.armbian.com/orangepizero2/Trixie_current_minimal"
 ROOT_PASS="orangepi"
 
 LOOP_OUTPUT=""
