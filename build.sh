@@ -12,8 +12,7 @@ OUTPUT="$(pwd)/orangepi-zero2-debian13-trixie-btrfs.img"
 COMPRESS="xz"
 WORKDIR=""
 ARMBIAN_URL="https://dl.armbian.com/orangepizero2/Bookworm_current_minimal"
-ROOT_PASS=""
-ROOT_PASS_HASH=""
+ROOT_PASS="orangepi"
 
 LOOP_OUTPUT=""
 LOOP_ARMBIAN=""
@@ -29,44 +28,21 @@ log() {
   echo "[${SCRIPT_NAME}] $*"
 }
 
-usage() {
-  cat <<USAGE
-用法: ${SCRIPT_NAME} [选项]
-
-选项:
-  --image-size SIZE       镜像大小 (默认: 4G)
-  --suite SUITE           Debian 发行版代号 (默认: trixie)
-  --arch ARCH             架构 (默认: arm64)
-  --hostname HOSTNAME     主机名 (默认: orangepi-zero2)
-  --mirror MIRROR         Debian 镜像源 (默认: http://mirrors.ustc.edu.cn/debian)
-  --output PATH           输出镜像路径 (默认: ./orangepi-zero2-debian13-trixie-btrfs.img)
-  --compress xz|none      是否压缩 (默认: xz)
-  --workdir DIR           工作目录 (默认: /tmp/opi-build-XXXX)
-  --armbian-url URL       Armbian 下载链接 (默认: https://dl.armbian.com/orangepizero2/Bookworm_current_minimal)
-  --root-pass PASS        root 明文密码 (可选)
-  --root-pass-hash HASH   root 密码 hash (优先)
-  -h, --help              显示帮助
-
-示例:
-  sudo ${SCRIPT_NAME} --image-size 6G --compress none
-USAGE
-}
-
 cleanup() {
   set +e
-  if mountpoint -q "${MNT_BOOT}"; then
+  if [[ -n "${MNT_BOOT}" ]] && mountpoint -q "${MNT_BOOT}"; then
     umount -lf "${MNT_BOOT}"
   fi
-  if mountpoint -q "${MNT_ROOT}/dev"; then
+  if [[ -n "${MNT_ROOT}" ]] && mountpoint -q "${MNT_ROOT}/dev"; then
     umount -lf "${MNT_ROOT}/dev"
   fi
-  if mountpoint -q "${MNT_ROOT}/proc"; then
+  if [[ -n "${MNT_ROOT}" ]] && mountpoint -q "${MNT_ROOT}/proc"; then
     umount -lf "${MNT_ROOT}/proc"
   fi
-  if mountpoint -q "${MNT_ROOT}/sys"; then
+  if [[ -n "${MNT_ROOT}" ]] && mountpoint -q "${MNT_ROOT}/sys"; then
     umount -lf "${MNT_ROOT}/sys"
   fi
-  if mountpoint -q "${MNT_ROOT}"; then
+  if [[ -n "${MNT_ROOT}" ]] && mountpoint -q "${MNT_ROOT}"; then
     umount -lf "${MNT_ROOT}"
   fi
   if [[ -n "${LOOP_OUTPUT}" ]]; then
@@ -91,18 +67,54 @@ require_root() {
 
 check_deps() {
   local deps=(
-    debootstrap qemu-aarch64-static parted losetup mkfs.vfat mkfs.btrfs mount rsync wget curl xz chroot lsblk
+    debootstrap qemu-aarch64-static parted losetup mkfs.vfat mkfs.btrfs mount rsync xz chroot lsblk
   )
   local missing=()
+
   for d in "${deps[@]}"; do
     if ! command -v "${d}" >/dev/null 2>&1; then
       missing+=("${d}")
     fi
   done
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    missing+=("wget/curl")
+  fi
   if [[ "${#missing[@]}" -ne 0 ]]; then
-    echo "缺少依赖: ${missing[*]}"
+    echo "缺少依赖命令: ${missing[*]}"
+    echo "请先安装依赖后重试（见 README.md）"
     exit 1
   fi
+}
+
+ensure_loop_support() {
+  if losetup -f >/dev/null 2>&1; then
+    return
+  fi
+
+  if command -v modprobe >/dev/null 2>&1; then
+    modprobe loop >/dev/null 2>&1 || true
+  fi
+
+  if [[ -e /dev/loop-control ]]; then
+    local i
+    for i in $(seq 0 7); do
+      if [[ ! -e "/dev/loop${i}" ]]; then
+        mknod -m 660 "/dev/loop${i}" b 7 "${i}" >/dev/null 2>&1 || true
+      fi
+    done
+    chown root:disk /dev/loop[0-7] >/dev/null 2>&1 || true
+  fi
+
+  if losetup -f >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "未找到可用 loop 设备（losetup -f 失败）。"
+  echo "请确认当前环境支持 loop 设备："
+  echo "  1) 在宿主机执行: modprobe loop"
+  echo "  2) 确认存在: /dev/loop-control 和 /dev/loop0"
+  echo "  3) 若在容器/受限云主机，请开启 loop 设备权限或改用支持 loop 的 VM"
+  exit 1
 }
 
 parse_args() {
@@ -148,21 +160,24 @@ parse_args() {
         ROOT_PASS="$2"
         shift 2
         ;;
-      --root-pass-hash)
-        ROOT_PASS_HASH="$2"
-        shift 2
-        ;;
-      -h|--help)
-        usage
-        exit 0
-        ;;
       *)
         echo "未知参数: $1"
-        usage
+        echo "请查看 README.md 获取用法说明。"
         exit 1
         ;;
     esac
   done
+}
+
+validate_args() {
+  case "${COMPRESS}" in
+    xz|none)
+      ;;
+    *)
+      echo "无效参数: --compress ${COMPRESS} (仅支持 xz|none)"
+      exit 1
+      ;;
+  esac
 }
 
 init_workdir() {
@@ -181,22 +196,8 @@ init_workdir() {
 }
 
 read_root_password() {
-  if [[ -n "${ROOT_PASS_HASH}" ]]; then
-    return
-  fi
   if [[ -z "${ROOT_PASS}" ]]; then
-    while true; do
-      read -r -s -p "请输入 root 密码: " pass1
-      echo
-      read -r -s -p "请再次输入 root 密码: " pass2
-      echo
-      if [[ "${pass1}" == "${pass2}" && -n "${pass1}" ]]; then
-        ROOT_PASS="${pass1}"
-        break
-      else
-        echo "两次输入不一致或为空，请重试。"
-      fi
-    done
+    ROOT_PASS="orangepi"
   fi
 }
 
@@ -216,18 +217,32 @@ download_armbian_minimal() {
   log "下载 Armbian 资产: ${ARMBIAN_URL}"
 
   local resolved_url="${ARMBIAN_URL}"
-  if [[ ! "${ARMBIAN_URL}" =~ \.img\.xz$ ]]; then
-    log "解析 Armbian 下载页面，查找 .img.xz"
-    local page_content=""
+  local final_url=""
+
+  if [[ ! "${resolved_url}" =~ \.img\.xz($|[?#]) ]]; then
     if command -v curl >/dev/null 2>&1; then
-      page_content=$(curl -L "${ARMBIAN_URL}")
+      final_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "${ARMBIAN_URL}" 2>/dev/null || true)
     else
-      page_content=$(wget -qO- "${ARMBIAN_URL}")
+      final_url=$(wget --max-redirect=20 --server-response --spider "${ARMBIAN_URL}" 2>&1 | awk '/^  Location: / {print $2}' | tail -n1 | tr -d '\r' || true)
     fi
-    resolved_url=$(echo "${page_content}" | grep -oE 'https?://[^"]+\.img\.xz' | head -n1 || true)
+    if [[ "${final_url}" =~ \.img\.xz($|[?#]) ]]; then
+      resolved_url="${final_url}"
+    fi
+  fi
+
+  if [[ ! "${resolved_url}" =~ \.img\.xz($|[?#]) ]]; then
+    log "解析 Armbian 下载页面，查找 .img.xz"
+    local page_file
+    page_file=$(mktemp "${WORKDIR_CREATED}/armbian-page-XXXXXX")
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL "${ARMBIAN_URL}" -o "${page_file}"
+    else
+      wget -qO "${page_file}" "${ARMBIAN_URL}"
+    fi
+    resolved_url=$(grep -aoE 'https?://[^"[:space:]]+\.img\.xz' "${page_file}" | head -n1 || true)
     if [[ -z "${resolved_url}" ]]; then
       local href
-      href=$(echo "${page_content}" | grep -oE 'href=\"[^"]+\.img\.xz\"' | head -n1 | cut -d'"' -f2 || true)
+      href=$(grep -aoE 'href=\"[^\"]+\.img\.xz\"' "${page_file}" | head -n1 | cut -d'"' -f2 || true)
       if [[ -n "${href}" ]]; then
         if [[ "${href}" =~ ^https?:// ]]; then
           resolved_url="${href}"
@@ -236,22 +251,26 @@ download_armbian_minimal() {
         fi
       fi
     fi
+    rm -f "${page_file}"
   fi
 
-  if [[ -z "${resolved_url}" || ! "${resolved_url}" =~ \.img\.xz$ ]]; then
+  if [[ -z "${resolved_url}" || ! "${resolved_url}" =~ \.img\.xz($|[?#]) ]]; then
     echo "无法解析 Armbian 镜像下载地址，请检查 --armbian-url"
     exit 1
   fi
 
   local file_name
-  file_name=$(basename "${resolved_url}")
+  file_name=$(basename "${resolved_url%%\?*}")
+  if [[ -z "${file_name}" || ! "${file_name}" =~ \.img\.xz$ ]]; then
+    file_name="armbian.img.xz"
+  fi
   ARMBIAN_IMG_XZ="${ARMBIAN_CACHE_DIR}/${file_name}"
   if [[ -f "${ARMBIAN_IMG_XZ}" ]]; then
     log "使用缓存: ${ARMBIAN_IMG_XZ}"
     return
   fi
   if command -v curl >/dev/null 2>&1; then
-    curl -L "${resolved_url}" -o "${ARMBIAN_IMG_XZ}"
+    curl -fL "${resolved_url}" -o "${ARMBIAN_IMG_XZ}"
   else
     wget -O "${ARMBIAN_IMG_XZ}" "${resolved_url}"
   fi
@@ -443,11 +462,7 @@ PermitRootLogin yes
 PasswordAuthentication yes
 EOF
 
-  if [[ -n "${ROOT_PASS_HASH}" ]]; then
-    chroot "${MNT_ROOT}" /bin/bash -c "usermod -p '${ROOT_PASS_HASH}' root"
-  else
-    echo "root:${ROOT_PASS}" | chroot "${MNT_ROOT}" chpasswd
-  fi
+  echo "root:${ROOT_PASS}" | chroot "${MNT_ROOT}" chpasswd
 
   cat <<'EOF' > "${MNT_ROOT}/etc/fstab"
 /dev/mmcblk0p2 / btrfs defaults,compress=zstd,noatime 0 1
@@ -520,20 +535,30 @@ print_flash_hint() {
   local out_file="${OUTPUT}"
   if [[ "${COMPRESS}" == "xz" ]]; then
     out_file="${OUTPUT}.xz"
-  fi
-  cat <<EOF
+    cat <<EOF
 镜像生成完成: ${out_file}
 
 烧录示例:
   xz -d ${out_file}
   sudo dd if=${OUTPUT} of=/dev/sdX bs=4M conv=fsync status=progress
 EOF
+    return
+  fi
+
+  cat <<EOF
+镜像生成完成: ${out_file}
+
+烧录示例:
+  sudo dd if=${out_file} of=/dev/sdX bs=4M conv=fsync status=progress
+EOF
 }
 
 main() {
   parse_args "$@"
+  validate_args
   require_root
   check_deps
+  ensure_loop_support
   init_workdir
   read_root_password
   download_armbian_minimal

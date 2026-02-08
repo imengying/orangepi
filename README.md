@@ -12,19 +12,18 @@
 
 ## 依赖
 
-脚本会检查以下依赖：
+需要以下软件包：
 
 - debootstrap
-- qemu-user-static（需要 `qemu-aarch64-static`）
+- qemu-user-static
 - parted
-- losetup
-- mkfs.vfat
-- mkfs.btrfs
-- mount
+- util-linux
+- dosfstools
+- btrfs-progs
 - rsync
-- wget/curl
-- xz
-- chroot
+- wget 或 curl
+- xz-utils
+- coreutils
 
 ## 使用方法
 
@@ -32,31 +31,36 @@
 sudo ./build.sh
 ```
 
-常用参数：
+一键运行示例（需要 root 权限）：
 
 ```bash
-sudo ./build.sh \
-  --image-size 6G \
-  --suite trixie \
-  --arch arm64 \
-  --hostname orangepi-zero2 \
-  --mirror http://mirrors.ustc.edu.cn/debian \
-  --output ./orangepi-zero2-debian13-trixie-btrfs.img \
-  --compress xz \
-  --armbian-url https://dl.armbian.com/orangepizero2/Bookworm_current_minimal
+sudo bash -c 'bash <(curl -fsSL "https://raw.githubusercontent.com/imengying/orangepi/refs/heads/main/build.sh")'
 ```
 
-脚本会提示输入 root 密码，或使用以下参数传入：
+常用参数：
 
-- `--root-pass`：明文密码（注意风险）
-- `--root-pass-hash`：已加密 hash（优先）
+- `--image-size SIZE`：镜像大小，默认 `4G`
+- `--suite SUITE`：Debian 发行版代号，默认 `trixie`
+- `--arch ARCH`：目标架构，默认 `arm64`
+- `--hostname HOSTNAME`：主机名，默认 `orangepi-zero2`
+- `--mirror MIRROR`：Debian 镜像源，默认 `http://mirrors.ustc.edu.cn/debian`
+- `--output PATH`：输出镜像路径，默认 `./orangepi-zero2-debian13-trixie-btrfs.img`
+- `--compress xz|none`：是否压缩，默认 `xz`
+- `--workdir DIR`：工作目录，默认 `/tmp/opi-build-XXXX`
+- `--armbian-url URL`：Armbian 下载链接，默认 `https://dl.armbian.com/orangepizero2/Bookworm_current_minimal`
+
+## 账号与密码
+
+- 默认账号：`root`
+- 默认密码：`orangepi`
+- 如需修改默认密码，可使用参数：`--root-pass <PASSWORD>`
 
 ## 输出与烧录
 
-默认输出：
+输出规则（`--output` 与 `--compress`）：
 
-- `orangepi-zero2-debian13-trixie-btrfs.img`
-- 可选压缩为 `.xz`
+- 默认 `--compress xz`，最终输出为 `--output` 对应文件的 `.xz`（默认 `orangepi-zero2-debian13-trixie-btrfs.img.xz`）。
+- 当 `--compress none` 时，最终输出为 `--output` 原文件（默认 `orangepi-zero2-debian13-trixie-btrfs.img`）。
 
 烧录示例（脚本不会直接写盘）：
 

@@ -1,0 +1,58 @@
+name: Build And Release OrangePi Image
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debootstrap qemu-user-static parted util-linux dosfstools btrfs-progs rsync wget curl xz-utils coreutils
+
+      - name: Build image
+        run: |
+          chmod +x build.sh
+          sudo ./build.sh
+
+      - name: Find output image
+        id: output
+        run: |
+          set -euo pipefail
+          FILE_PATH="$(find . -maxdepth 1 -type f -name '*.img.xz' | head -n1)"
+          if [[ -z "${FILE_PATH}" ]]; then
+            echo "未找到构建产物 (*.img.xz)"
+            exit 1
+          fi
+          echo "file=${FILE_PATH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: orangepi-image-${{ github.ref_name }}
+          path: ${{ steps.output.outputs.file }}
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.output.outputs.file }}
