@@ -65,7 +65,7 @@ sudo bash -c 'bash <(curl -fsSL "https://raw.githubusercontent.com/imengying/ora
 - `--uboot-repo URL`：U-Boot 仓库，默认 `https://github.com/u-boot/u-boot.git`
 - `--uboot-ref REF`：U-Boot 分支/标签，默认 `v2025.01`
 - `--atf-repo URL`：ARM Trusted Firmware 仓库，默认 `https://github.com/ARM-software/arm-trusted-firmware.git`
-- `--atf-ref REF`：ARM Trusted Firmware 分支/标签，默认 `v2.12.1`
+- `--atf-ref REF`：ARM Trusted Firmware 分支/标签，默认 `v2.12.0`
 
 ## 账号与密码
 

@@ -19,7 +19,7 @@ KERNEL_DEFCONFIG="defconfig"
 UBOOT_REPO="https://github.com/u-boot/u-boot.git"
 UBOOT_REF="v2025.01"
 ATF_REPO="https://github.com/ARM-software/arm-trusted-firmware.git"
-ATF_REF="v2.12.1"
+ATF_REF="v2.12.0"
 JOBS="$(nproc)"
 
 LOOP_OUTPUT=""
@@ -264,17 +264,41 @@ clone_repo() {
   local repo="$1"
   local ref="$2"
   local dst="$3"
+  local -a candidates=("${ref}")
+  local cand
+  local major=""
+  local minor=""
 
-  rm -rf "${dst}"
-
-  if git clone --depth 1 --branch "${ref}" "${repo}" "${dst}"; then
-    return
+  if [[ "${ref}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    candidates+=("v${major}.${minor}.0" "v${major}.${minor}")
+  elif [[ "${ref}" =~ ^v([0-9]+)\.([0-9]+)$ ]]; then
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    candidates+=("v${major}.${minor}.0")
   fi
 
-  rm -rf "${dst}"
-  git clone --depth 1 "${repo}" "${dst}"
-  git -C "${dst}" fetch --depth 1 origin "${ref}"
-  git -C "${dst}" checkout --detach FETCH_HEAD
+  for cand in "${candidates[@]}"; do
+    rm -rf "${dst}"
+    if git clone --depth 1 --branch "${cand}" "${repo}" "${dst}" >/dev/null 2>&1; then
+      log "源码版本: ${repo} @ ${cand}"
+      return
+    fi
+
+    rm -rf "${dst}"
+    if git clone --depth 1 "${repo}" "${dst}" >/dev/null 2>&1; then
+      if git -C "${dst}" fetch --depth 1 origin "${cand}" >/dev/null 2>&1 && \
+         git -C "${dst}" checkout --detach FETCH_HEAD >/dev/null 2>&1; then
+        log "源码版本: ${repo} @ ${cand}"
+        return
+      fi
+    fi
+  done
+
+  echo "无法检出源码版本: ${repo} @ ${ref}"
+  echo "请通过 --kernel-ref / --uboot-ref / --atf-ref 指定存在的分支或标签。"
+  exit 1
 }
 
 fetch_sources() {
