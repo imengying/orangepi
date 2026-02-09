@@ -57,7 +57,7 @@ sudo bash -c 'bash <(curl -fsSL "https://raw.githubusercontent.com/imengying/ora
 - `--image-size SIZE`：镜像大小，默认 `4G`
 - `--suite SUITE`：Debian 发行版代号，默认 `trixie`
 - `--arch ARCH`：目标架构，默认 `arm64`（当前仅支持 `arm64`）
-- `--hostname HOSTNAME`：主机名，默认 `orangepi-zero2`
+- `--hostname HOSTNAME`：主机名，默认 `Orangepi`
 - `--mirror MIRROR`：Debian 镜像源，默认 `http://mirrors.ustc.edu.cn/debian`
 - `--output PATH`：输出镜像路径，默认 `./orangepi-zero2-debian13-trixie-btrfs.img`
 - `--compress xz|none`：是否压缩，默认 `xz`
