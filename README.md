@@ -7,10 +7,12 @@
 - 使用 Debian 官方 `debootstrap` 构建 Debian 13 (trixie) arm64 rootfs。
 - 全自编译 ARM Trusted Firmware、U-Boot、Linux 内核（不再依赖从 Armbian 镜像提取启动资产）。
 - 构建流程参考 Orange Pi 官方 `orangepi-build`，默认源码使用上游仓库。
-- root 分区为 btrfs，挂载选项：`compress=zstd,noatime`。
+- root 分区为 btrfs，挂载选项：`compress=zstd`（移除 noatime 以延长 SD 卡寿命）。
 - 启用 SSH（允许 root 密码登录）、NetworkManager、systemd-timesyncd。
-- 首次启动自动扩容 `/dev/mmcblk0p2`，并扩展 btrfs 文件系统。
+- 首次启动自动扩容 `/dev/mmcblk0p2`，并扩展 btrfs 文件系统（使用 growpart 工具）。
 - **镜像优化**：使用 `--no-install-recommends`、清理缓存文档、精简内核模块、极限压缩，大幅减小镜像体积。
+- **LED 控制**：电源指示灯设置为心跳模式（可自定义）。
+- **精简配置**：移除 WiFi/蓝牙固件（有线网络可用，减小镜像体积）。
 
 ## 依赖
 
@@ -62,7 +64,7 @@ sudo bash -c 'bash <(curl -fsSL "https://raw.githubusercontent.com/imengying/ora
 - `--workdir DIR`：工作目录，默认 `/tmp/opi-build-XXXX`
 - `--jobs N`：并行编译线程数，默认 `nproc`
 - `--kernel-repo URL`：Linux 内核仓库，默认 `https://github.com/torvalds/linux.git`
-- `--kernel-ref REF`：Linux 内核分支/标签，默认 `v6.12`
+- `--kernel-ref REF`：Linux 内核分支/标签，默认 `v6.12.69`
 - `--kernel-defconfig NAME`：内核配置目标，默认 `defconfig`
 - `--uboot-repo URL`：U-Boot 仓库，默认 `https://github.com/u-boot/u-boot.git`
 - `--uboot-ref REF`：U-Boot 分支/标签，默认 `v2025.01`

@@ -14,7 +14,7 @@ WORKDIR=""
 ROOT_PASS="orangepi"
 
 KERNEL_REPO="https://github.com/torvalds/linux.git"
-KERNEL_REF="v6.12"
+KERNEL_REF="v6.12.69"
 KERNEL_DEFCONFIG="defconfig"
 UBOOT_REPO="https://github.com/u-boot/u-boot.git"
 UBOOT_REF="v2025.01"
@@ -440,7 +440,7 @@ format_partitions() {
 }
 
 mount_partitions() {
-  mount -o compress=zstd,noatime "${LOOP_OUTPUT}p2" "${MNT_ROOT}"
+  mount -o compress=zstd "${LOOP_OUTPUT}p2" "${MNT_ROOT}"
   mkdir -p "${MNT_BOOT}"
   mount "${LOOP_OUTPUT}p1" "${MNT_BOOT}"
 }
@@ -475,6 +475,7 @@ LOG_PREFIX="[opi-firstboot-resize]"
 
 log() {
   echo "${LOG_PREFIX} $*"
+  logger -t opi-firstboot-resize "$*"
 }
 
 if [[ -f "${DONE_FILE}" ]]; then
@@ -483,41 +484,39 @@ if [[ -f "${DONE_FILE}" ]]; then
 fi
 
 log "开始扩容 /dev/mmcblk0p2"
-if command -v sfdisk >/dev/null 2>&1; then
+
+# 使用 growpart 扩展分区（更可靠）
+if command -v growpart >/dev/null 2>&1; then
+  log "使用 growpart 扩展分区"
+  growpart /dev/mmcblk0 2 || log "growpart 失败，尝试其他方法"
+elif command -v sfdisk >/dev/null 2>&1; then
   log "使用 sfdisk 扩展分区"
-  start_sector=$(sfdisk -d /dev/mmcblk0 | awk '/^\/dev\/mmcblk0p2/ {print $4}' | tr -d ',')
-  if [[ -n "${start_sector}" ]]; then
-    printf ',,L,\n' | sfdisk -N2 /dev/mmcblk0
-  fi
+  echo ", +" | sfdisk --no-reread -N 2 /dev/mmcblk0 || log "sfdisk 失败"
 else
   log "使用 parted 扩展分区"
-  parted -s /dev/mmcblk0 resizepart 2 100%
+  parted -s /dev/mmcblk0 resizepart 2 100% || log "parted 失败"
 fi
 
 log "刷新分区表"
-if command -v partprobe >/dev/null 2>&1; then
-  partprobe /dev/mmcblk0 || true
-else
-  blockdev --rereadpt /dev/mmcblk0 || true
-fi
+partprobe /dev/mmcblk0 2>/dev/null || blockdev --rereadpt /dev/mmcblk0 2>/dev/null || true
 
-sleep 2
+sleep 3
 
-new_size=$(blockdev --getsz /dev/mmcblk0p2 || echo 0)
-log "分区扇区数: ${new_size}"
+new_size=$(blockdev --getsize64 /dev/mmcblk0p2 2>/dev/null || echo 0)
+log "分区大小: $((new_size / 1024 / 1024)) MB"
 
-log "尝试扩容 btrfs"
-if btrfs filesystem resize max /; then
+log "扩容 btrfs 文件系统"
+if btrfs filesystem resize max / 2>&1 | tee -a /var/log/opi-resize.log; then
   log "btrfs 扩容成功"
   touch "${DONE_FILE}"
-  systemctl disable --now opi-firstboot-resize.service || true
-  exit 0
+  systemctl disable opi-firstboot-resize.service || true
+  log "扩容完成，系统将在 5 秒后重启"
+  sleep 5
+  systemctl reboot || true
+else
+  log "btrfs 扩容失败，请手动执行: btrfs filesystem resize max /"
 fi
 
-log "btrfs 扩容未完成，尝试重启后继续"
-if ! systemctl reboot; then
-  log "重启失败，稍后手动处理"
-fi
 exit 0
 SCRIPT
   chmod +x "${MNT_ROOT}/usr/local/sbin/opi-firstboot-resize.sh"
@@ -555,7 +554,7 @@ deb ${MIRROR} ${SUITE}-updates main contrib non-free non-free-firmware
 EOF2
 
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
-  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted firmware-linux firmware-realtek firmware-misc-nonfree wireless-tools wpasupplicant"
+  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
 
   # 配置 initramfs 以支持 btrfs
@@ -574,12 +573,45 @@ EOF2
   echo "root:${ROOT_PASS}" | chroot "${MNT_ROOT}" chpasswd
 
   cat <<'EOF2' > "${MNT_ROOT}/etc/fstab"
-/dev/mmcblk0p2 / btrfs defaults,compress=zstd,noatime 0 1
+/dev/mmcblk0p2 / btrfs defaults,compress=zstd 0 1
 /dev/mmcblk0p1 /boot vfat defaults 0 2
 EOF2
 
   write_resize_script
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable opi-firstboot-resize.service"
+  
+  # 配置 LED（关闭电源指示灯或设置为心跳模式）
+  log "配置 LED 行为"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/rc.local"
+#!/bin/bash
+# 设置 LED 为心跳模式（可选：改为 none 关闭）
+# 红色电源灯
+if [ -e /sys/class/leds/orangepi:red:power ]; then
+  echo heartbeat > /sys/class/leds/orangepi:red:power/trigger
+fi
+# 绿色状态灯
+if [ -e /sys/class/leds/orangepi:green:status ]; then
+  echo heartbeat > /sys/class/leds/orangepi:green:status/trigger
+fi
+exit 0
+EOF2
+  chmod +x "${MNT_ROOT}/etc/rc.local"
+  
+  # 创建 systemd 服务来运行 rc.local
+  cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/rc-local.service"
+[Unit]
+Description=LED Configuration
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/rc.local
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable rc-local.service"
   
   log "清理系统以减小镜像大小"
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get clean"
