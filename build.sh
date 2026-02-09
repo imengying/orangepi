@@ -591,19 +591,6 @@ EOF2
   chroot "${MNT_ROOT}" /bin/bash -c "find /var/log -type f -exec truncate -s 0 {} \;"
   chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /usr/share/pixmaps/* /usr/share/icons/*"
   chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /usr/share/sounds/*"
-  
-  # 移除不必要的内核模块（保留网络和存储相关）
-  log "精简内核模块"
-  chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules -name '*.ko' -path '*/kernel/sound/*' -delete" || true
-  chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules -name '*.ko' -path '*/kernel/drivers/gpu/*' -delete" || true
-  chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules -name '*.ko' -path '*/kernel/drivers/media/*' -delete" || true
-  chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules -name '*.ko' -path '*/kernel/drivers/staging/*' -delete" || true
-  
-  # 重新生成模块依赖
-  KERNEL_VER=$(ls "${MNT_ROOT}/lib/modules" | head -n1)
-  if [[ -n "${KERNEL_VER}" ]]; then
-    chroot "${MNT_ROOT}" /bin/bash -c "depmod -a ${KERNEL_VER}" || true
-  fi
 }
 
 install_compiled_kernel() {
@@ -626,6 +613,18 @@ install_compiled_kernel() {
   if [[ ! -f "${MNT_BOOT}/${ASSET_INITRD_NAME}" ]]; then
     echo "未生成 initrd: /boot/${ASSET_INITRD_NAME}"
     exit 1
+  fi
+  
+  # 精简内核模块（在安装后）
+  log "精简内核模块"
+  if [[ -d "${MNT_ROOT}/lib/modules/${KERNEL_RELEASE}" ]]; then
+    chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules/${KERNEL_RELEASE} -name '*.ko' -path '*/kernel/sound/*' -delete" || true
+    chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules/${KERNEL_RELEASE} -name '*.ko' -path '*/kernel/drivers/gpu/*' -delete" || true
+    chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules/${KERNEL_RELEASE} -name '*.ko' -path '*/kernel/drivers/media/*' -delete" || true
+    chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules/${KERNEL_RELEASE} -name '*.ko' -path '*/kernel/drivers/staging/*' -delete" || true
+    
+    # 重新生成模块依赖
+    chroot "${MNT_ROOT}" /bin/bash -c "depmod -a '${KERNEL_RELEASE}'" || true
   fi
 }
 
