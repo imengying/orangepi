@@ -5,8 +5,9 @@
 ## 功能概览
 
 - 使用 Debian 官方 `debootstrap` 构建 Debian 13 (trixie) arm64 rootfs。
+- 全自编译 ARM Trusted Firmware、U-Boot、Linux 内核（不再依赖从 Armbian 镜像提取启动资产）。
+- 构建流程参考 Orange Pi 官方 `orangepi-build`，默认源码使用上游仓库。
 - root 分区为 btrfs，挂载选项：`compress=zstd,noatime`。
-- 从 Armbian Orange Pi Zero 2 Minimal 镜像中提取 U-Boot、内核、DTB、initrd 资产。
 - 启用 SSH（允许 root 密码登录）、NetworkManager、systemd-timesyncd。
 - 首次启动自动扩容 `/dev/mmcblk0p2`，并扩展 btrfs 文件系统。
 
@@ -21,9 +22,19 @@
 - dosfstools
 - btrfs-progs
 - rsync
-- wget 或 curl
 - xz-utils
 - coreutils
+- git
+- make
+- gcc-aarch64-linux-gnu
+- bc
+- bison
+- flex
+- libssl-dev
+- libelf-dev
+- device-tree-compiler
+- swig
+- python3
 
 ## 使用方法
 
@@ -41,13 +52,20 @@ sudo bash -c 'bash <(curl -fsSL "https://raw.githubusercontent.com/imengying/ora
 
 - `--image-size SIZE`：镜像大小，默认 `4G`
 - `--suite SUITE`：Debian 发行版代号，默认 `trixie`
-- `--arch ARCH`：目标架构，默认 `arm64`
+- `--arch ARCH`：目标架构，默认 `arm64`（当前仅支持 `arm64`）
 - `--hostname HOSTNAME`：主机名，默认 `orangepi-zero2`
 - `--mirror MIRROR`：Debian 镜像源，默认 `http://mirrors.ustc.edu.cn/debian`
 - `--output PATH`：输出镜像路径，默认 `./orangepi-zero2-debian13-trixie-btrfs.img`
 - `--compress xz|none`：是否压缩，默认 `xz`
 - `--workdir DIR`：工作目录，默认 `/tmp/opi-build-XXXX`
-- `--armbian-url URL`：Armbian 下载链接，默认 `https://dl.armbian.com/orangepizero2/Bookworm_current_minimal`
+- `--jobs N`：并行编译线程数，默认 `nproc`
+- `--kernel-repo URL`：Linux 内核仓库，默认 `https://github.com/torvalds/linux.git`
+- `--kernel-ref REF`：Linux 内核分支/标签，默认 `v6.12`
+- `--kernel-defconfig NAME`：内核配置目标，默认 `defconfig`
+- `--uboot-repo URL`：U-Boot 仓库，默认 `https://github.com/u-boot/u-boot.git`
+- `--uboot-ref REF`：U-Boot 分支/标签，默认 `v2025.01`
+- `--atf-repo URL`：ARM Trusted Firmware 仓库，默认 `https://github.com/ARM-software/arm-trusted-firmware.git`
+- `--atf-ref REF`：ARM Trusted Firmware 分支/标签，默认 `v2.12.1`
 
 ## 账号与密码
 
