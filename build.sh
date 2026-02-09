@@ -348,10 +348,48 @@ build_kernel() {
   fi
 
   if [[ -x "${KERNEL_SRC_DIR}/scripts/config" ]]; then
+    log "启用额外的内核功能"
     "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_SRC_DIR}/.config" \
       --enable BLK_DEV_INITRD \
       --enable BTRFS_FS \
-      --enable BTRFS_FS_POSIX_ACL
+      --enable BTRFS_FS_POSIX_ACL \
+      --enable USB \
+      --enable USB_SUPPORT \
+      --enable USB_XHCI_HCD \
+      --enable USB_EHCI_HCD \
+      --enable USB_OHCI_HCD \
+      --enable USB_STORAGE \
+      --enable USB_MUSB_HDRC \
+      --enable USB_MUSB_SUNXI \
+      --enable PHY_SUN4I_USB \
+      --enable EXTCON \
+      --enable EXTCON_USB_GPIO \
+      --enable WLAN \
+      --enable CFG80211 \
+      --enable MAC80211 \
+      --enable WIRELESS \
+      --module RTL8XXXU \
+      --module RTW88 \
+      --module RTW88_8822B \
+      --module RTW88_8822BS \
+      --module RTW88_8822C \
+      --module RTW88_8822CS \
+      --module RTW89 \
+      --module RTW89_8852A \
+      --module RTW89_8852AE \
+      --enable THERMAL \
+      --enable CPU_THERMAL \
+      --enable THERMAL_GOV_STEP_WISE \
+      --enable THERMAL_GOV_USER_SPACE \
+      --enable THERMAL_EMULATION \
+      --enable SUN8I_THERMAL \
+      --module REGULATOR_SY8106A \
+      --module I2C_MV64XXX \
+      --module SPI_SUN6I \
+      --enable MMC \
+      --enable MMC_SUNXI \
+      --enable STMMAC_ETH \
+      --enable DWMAC_SUN8I
   fi
 
   make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
@@ -517,7 +555,7 @@ deb ${MIRROR} ${SUITE}-updates main contrib non-free non-free-firmware
 EOF2
 
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
-  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted util-linux"
+  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted util-linux firmware-linux firmware-realtek firmware-misc-nonfree wireless-tools wpasupplicant"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
 
   mkdir -p "${MNT_ROOT}/etc/ssh/sshd_config.d"
