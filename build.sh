@@ -42,6 +42,9 @@ cleanup() {
   if [[ -n "${MNT_BOOT}" ]] && mountpoint -q "${MNT_BOOT}"; then
     umount -lf "${MNT_BOOT}"
   fi
+  if [[ -n "${MNT_ROOT}" ]] && mountpoint -q "${MNT_ROOT}/dev/pts"; then
+    umount -lf "${MNT_ROOT}/dev/pts"
+  fi
   if [[ -n "${MNT_ROOT}" ]] && mountpoint -q "${MNT_ROOT}/dev"; then
     umount -lf "${MNT_ROOT}/dev"
   fi
@@ -353,7 +356,7 @@ extract_armbian_assets() {
     if ! mount -o ro "${p}" "${ARMBIAN_BOOT_MNT}" 2>/dev/null; then
       continue
     fi
-    dtb_found=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
+    dtb_found=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
     if [[ -n "${dtb_found}" ]]; then
       selected_part="${p}"
       break
@@ -368,15 +371,15 @@ extract_armbian_assets() {
   log "使用分区提取启动资产: ${selected_part}"
 
   local kernel_path
-  kernel_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "Image" | head -n1 || true)
+  kernel_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "Image" | head -n1 || true)
   if [[ -z "${kernel_path}" ]]; then
-    kernel_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "Image-*" | head -n1 || true)
+    kernel_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "Image-*" | head -n1 || true)
   fi
   if [[ -z "${kernel_path}" ]]; then
-    kernel_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "vmlinuz*" | head -n1 || true)
+    kernel_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "vmlinuz*" | head -n1 || true)
   fi
   if [[ -z "${kernel_path}" ]]; then
-    kernel_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "zImage*" | head -n1 || true)
+    kernel_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "zImage*" | head -n1 || true)
   fi
   if [[ -z "${kernel_path}" ]]; then
     echo "未找到内核文件（Image/Image-*/vmlinuz*/zImage*），启动分区结构可能已变化。"
@@ -386,9 +389,9 @@ extract_armbian_assets() {
   cp "${kernel_path}" "${ASSETS_DIR}/${ASSET_KERNEL_NAME}"
 
   local initrd_path
-  initrd_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "uInitrd" | head -n1 || true)
+  initrd_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "uInitrd" | head -n1 || true)
   if [[ -z "${initrd_path}" ]]; then
-    initrd_path=$(find -L "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "initrd.img*" | head -n1 || true)
+    initrd_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "initrd.img*" | head -n1 || true)
   fi
   if [[ -z "${initrd_path}" ]]; then
     echo "未找到 initrd（uInitrd 或 initrd.img*）"
@@ -424,7 +427,7 @@ create_blank_image() {
   parted -s "${OUTPUT}" set 1 boot on
   parted -s "${OUTPUT}" mkpart primary btrfs 513MiB 100%
   log "分区信息:"
-  lsblk -o NAME,SIZE,TYPE "${OUTPUT}" || true
+  parted -s "${OUTPUT}" unit MiB print || true
 }
 
 setup_loop_for_output_image() {
@@ -457,6 +460,8 @@ build_debian_rootfs() {
   debootstrap --arch="${ARCH}" "${SUITE}" "${MNT_ROOT}" "${MIRROR}"
   cp "$(command -v qemu-aarch64-static)" "${MNT_ROOT}/usr/bin/"
   mount --bind /dev "${MNT_ROOT}/dev"
+  mkdir -p "${MNT_ROOT}/dev/pts"
+  mount --bind /dev/pts "${MNT_ROOT}/dev/pts"
   mount --bind /proc "${MNT_ROOT}/proc"
   mount --bind /sys "${MNT_ROOT}/sys"
   prepare_dns
@@ -615,6 +620,7 @@ finalize_image() {
 
   log "卸载并释放资源"
   umount -lf "${MNT_BOOT}"
+  umount -lf "${MNT_ROOT}/dev/pts" || true
   umount -lf "${MNT_ROOT}/dev" || true
   umount -lf "${MNT_ROOT}/proc" || true
   umount -lf "${MNT_ROOT}/sys" || true
