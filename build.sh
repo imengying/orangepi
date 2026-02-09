@@ -322,6 +322,11 @@ build_uboot() {
   log "编译 U-Boot"
   make -C "${UBOOT_SRC_DIR}" distclean >/dev/null 2>&1 || true
   make -C "${UBOOT_SRC_DIR}" CROSS_COMPILE=aarch64-linux-gnu- orangepi_zero2_defconfig
+  if [[ -x "${UBOOT_SRC_DIR}/scripts/config" ]]; then
+    "${UBOOT_SRC_DIR}/scripts/config" --file "${UBOOT_SRC_DIR}/.config" \
+      --disable TOOLS_MKEFICAPSULE || true
+    make -C "${UBOOT_SRC_DIR}" CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+  fi
   make -C "${UBOOT_SRC_DIR}" -j"${JOBS}" CROSS_COMPILE=aarch64-linux-gnu- BL31="${ATF_BL31}"
 
   local uboot_bin="${UBOOT_SRC_DIR}/u-boot-sunxi-with-spl.bin"

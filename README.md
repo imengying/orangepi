@@ -32,6 +32,7 @@
 - flex
 - libssl-dev
 - libelf-dev
+- libgnutls28-dev
 - device-tree-compiler
 - swig
 - python3

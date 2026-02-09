@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y debootstrap qemu-user-static parted util-linux dosfstools btrfs-progs rsync wget curl xz-utils coreutils git make gcc-aarch64-linux-gnu bc bison flex libssl-dev libelf-dev device-tree-compiler swig python3
+          sudo apt-get install -y debootstrap qemu-user-static parted util-linux dosfstools btrfs-progs rsync wget curl xz-utils coreutils git make gcc-aarch64-linux-gnu bc bison flex libssl-dev libelf-dev libgnutls28-dev device-tree-compiler swig python3
 
       - name: Build image
         run: |
