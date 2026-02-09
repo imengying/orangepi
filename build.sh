@@ -6,7 +6,7 @@ SCRIPT_NAME=$(basename "$0")
 IMAGE_SIZE="3G"
 SUITE="trixie"
 ARCH="arm64"
-HOSTNAME="Orangepi"
+HOSTNAME="orangepi"
 MIRROR="http://mirrors.ustc.edu.cn/debian"
 OUTPUT="$(pwd)/orangepi-zero2-debian13-trixie-btrfs.img"
 COMPRESS="xz"
@@ -393,6 +393,14 @@ build_kernel() {
   fi
 
   make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+  
+  # 设置 EXTRAVERSION 以显示完整版本号
+  log "设置内核版本号"
+  if [[ "${KERNEL_REF}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    PATCH_VERSION="${BASH_REMATCH[3]}"
+    sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = .${PATCH_VERSION}/" "${KERNEL_SRC_DIR}/Makefile"
+  fi
+  
   make -C "${KERNEL_SRC_DIR}" -j"${JOBS}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image modules dtbs
 
   KERNEL_RELEASE=$(make -s -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kernelrelease)
@@ -556,6 +564,14 @@ EOF2
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
   chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
+  
+  # 禁用不必要的服务（保留串口和日志）
+  log "禁用不必要的服务"
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl mask getty@tty1.service" || true
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable apt-daily.timer apt-daily-upgrade.timer" || true
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable man-db.timer" || true
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable e2scrub_all.timer" || true
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable fstrim.timer" || true
 
   # 配置 initramfs 以支持 btrfs
   mkdir -p "${MNT_ROOT}/etc/initramfs-tools"
@@ -580,22 +596,104 @@ EOF2
   write_resize_script
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable opi-firstboot-resize.service"
   
+  # 配置 zram（压缩内存交换）
+  log "配置 zram"
+  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zram-tools"
+  
+  # 配置 zram 参数
+  cat <<'EOF2' > "${MNT_ROOT}/etc/default/zramswap"
+# zram 配置
+# 分配内存的百分比（50% = 0.5）
+ALLOCATION=0.5
+# 压缩算法（lz4 速度快，zstd 压缩率高）
+ALGO=lz4
+# 优先级
+PRIORITY=100
+EOF2
+  
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable zramswap.service"
+  
   # 配置 LED（关闭电源指示灯或设置为心跳模式）
   log "配置 LED 行为"
   cat <<'EOF2' > "${MNT_ROOT}/etc/rc.local"
 #!/bin/bash
 # 设置 LED 为心跳模式（可选：改为 none 关闭）
-# 红色电源灯
-if [ -e /sys/class/leds/orangepi:red:power ]; then
-  echo heartbeat > /sys/class/leds/orangepi:red:power/trigger
-fi
-# 绿色状态灯
-if [ -e /sys/class/leds/orangepi:green:status ]; then
-  echo heartbeat > /sys/class/leds/orangepi:green:status/trigger
-fi
+# 查找并配置所有可用的 LED
+for led in /sys/class/leds/*/trigger; do
+  led_name=$(dirname "$led")
+  led_base=$(basename "$led_name")
+  
+  # 如果是红色电源灯，设置为心跳模式
+  if [[ "$led_base" == *"red"* ]] || [[ "$led_base" == *"power"* ]]; then
+    echo heartbeat > "$led" 2>/dev/null || true
+  fi
+  
+  # 如果是绿色状态灯，设置为心跳模式
+  if [[ "$led_base" == *"green"* ]] || [[ "$led_base" == *"status"* ]]; then
+    echo heartbeat > "$led" 2>/dev/null || true
+  fi
+done
+
+# 如果上面的通用方法不工作，尝试具体路径
+echo heartbeat > /sys/class/leds/orangepi:red:power/trigger 2>/dev/null || true
+echo heartbeat > /sys/class/leds/orangepi:green:status/trigger 2>/dev/null || true
+
 exit 0
 EOF2
   chmod +x "${MNT_ROOT}/etc/rc.local"
+  
+  # 创建 LED 调试脚本
+  cat <<'EOF2' > "${MNT_ROOT}/usr/local/bin/led-control"
+#!/bin/bash
+# LED 控制脚本
+
+show_leds() {
+  echo "可用的 LED："
+  for led in /sys/class/leds/*; do
+    if [ -d "$led" ]; then
+      echo "  $(basename $led)"
+      echo "    当前触发器: $(cat $led/trigger 2>/dev/null | grep -o '\[.*\]' | tr -d '[]')"
+      echo "    可用触发器: $(cat $led/trigger 2>/dev/null)"
+    fi
+  done
+}
+
+set_mode() {
+  local mode=$1
+  case $mode in
+    heartbeat)
+      echo "设置为心跳模式"
+      for led in /sys/class/leds/*/trigger; do
+        echo heartbeat > "$led" 2>/dev/null || true
+      done
+      ;;
+    off)
+      echo "关闭所有 LED"
+      for led in /sys/class/leds/*/trigger; do
+        echo none > "$led" 2>/dev/null || true
+        echo 0 > "$(dirname $led)/brightness" 2>/dev/null || true
+      done
+      ;;
+    on)
+      echo "打开所有 LED"
+      for led in /sys/class/leds/*/trigger; do
+        echo none > "$led" 2>/dev/null || true
+        echo 1 > "$(dirname $led)/brightness" 2>/dev/null || true
+      done
+      ;;
+    *)
+      echo "用法: led-control [show|heartbeat|off|on]"
+      exit 1
+      ;;
+  esac
+}
+
+case ${1:-show} in
+  show) show_leds ;;
+  *) set_mode "$1" ;;
+esac
+EOF2
+  chmod +x "${MNT_ROOT}/usr/local/bin/led-control"
   
   # 创建 systemd 服务来运行 rc.local
   cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/rc-local.service"
@@ -634,9 +732,10 @@ install_compiled_kernel() {
   mkdir -p "${MNT_BOOT}/dtb"
   rsync -a "${ASSETS_DIR}/dtb/" "${MNT_BOOT}/dtb/"
 
-  cp "${ASSETS_DIR}/${ASSET_KERNEL_NAME}" "${MNT_ROOT}/boot/vmlinuz-${KERNEL_RELEASE}"
-  cp "${ASSETS_DIR}/System.map-${KERNEL_RELEASE}" "${MNT_ROOT}/boot/System.map-${KERNEL_RELEASE}"
-  cp "${ASSETS_DIR}/config-${KERNEL_RELEASE}" "${MNT_ROOT}/boot/config-${KERNEL_RELEASE}"
+  # 不复制 System.map 和 config 到 /boot（节省空间）
+  # cp "${ASSETS_DIR}/${ASSET_KERNEL_NAME}" "${MNT_ROOT}/boot/vmlinuz-${KERNEL_RELEASE}"
+  # cp "${ASSETS_DIR}/System.map-${KERNEL_RELEASE}" "${MNT_ROOT}/boot/System.map-${KERNEL_RELEASE}"
+  # cp "${ASSETS_DIR}/config-${KERNEL_RELEASE}" "${MNT_ROOT}/boot/config-${KERNEL_RELEASE}"
 
   chroot "${MNT_ROOT}" /bin/bash -c "depmod -a '${KERNEL_RELEASE}'"
   chroot "${MNT_ROOT}" /bin/bash -c "update-initramfs -c -k '${KERNEL_RELEASE}'"
@@ -658,6 +757,12 @@ install_compiled_kernel() {
     # 重新生成模块依赖
     chroot "${MNT_ROOT}" /bin/bash -c "depmod -a '${KERNEL_RELEASE}'" || true
   fi
+  
+  # 清理 boot 分区不必要的文件
+  log "清理 boot 分区"
+  rm -f "${MNT_ROOT}/boot/vmlinuz-${KERNEL_RELEASE}" 2>/dev/null || true
+  rm -f "${MNT_ROOT}/boot/System.map-${KERNEL_RELEASE}" 2>/dev/null || true
+  rm -f "${MNT_ROOT}/boot/config-${KERNEL_RELEASE}" 2>/dev/null || true
 }
 
 install_boot_assets() {
