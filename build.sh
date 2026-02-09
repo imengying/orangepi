@@ -11,21 +11,30 @@ MIRROR="http://mirrors.ustc.edu.cn/debian"
 OUTPUT="$(pwd)/orangepi-zero2-debian13-trixie-btrfs.img"
 COMPRESS="xz"
 WORKDIR=""
-ARMBIAN_URL="https://dl.armbian.com/orangepizero2/Trixie_current_minimal"
 ROOT_PASS="orangepi"
 
+KERNEL_REPO="https://github.com/torvalds/linux.git"
+KERNEL_REF="v6.12"
+KERNEL_DEFCONFIG="defconfig"
+UBOOT_REPO="https://github.com/u-boot/u-boot.git"
+UBOOT_REF="v2025.01"
+ATF_REPO="https://github.com/ARM-software/arm-trusted-firmware.git"
+ATF_REF="v2.12.1"
+JOBS="$(nproc)"
+
 LOOP_OUTPUT=""
-LOOP_ARMBIAN=""
 WORKDIR_CREATED=""
 MNT_ROOT=""
 MNT_BOOT=""
 ASSETS_DIR=""
-ARMBIAN_CACHE_DIR=""
-ARMBIAN_IMG_XZ=""
-ARMBIAN_IMG=""
-ARMBIAN_BOOT_MNT=""
+SRC_DIR=""
+KERNEL_SRC_DIR=""
+UBOOT_SRC_DIR=""
+ATF_SRC_DIR=""
+ATF_BL31=""
+KERNEL_RELEASE=""
 ASSET_KERNEL_NAME="Image"
-ASSET_INITRD_NAME="uInitrd"
+ASSET_INITRD_NAME=""
 
 log() {
   echo "[${SCRIPT_NAME}] $*"
@@ -33,12 +42,6 @@ log() {
 
 cleanup() {
   set +e
-  if [[ -n "${ARMBIAN_BOOT_MNT}" ]] && mountpoint -q "${ARMBIAN_BOOT_MNT}"; then
-    umount -lf "${ARMBIAN_BOOT_MNT}"
-  fi
-  if [[ -n "${ARMBIAN_BOOT_MNT}" && -d "${ARMBIAN_BOOT_MNT}" ]]; then
-    rmdir "${ARMBIAN_BOOT_MNT}" || true
-  fi
   if [[ -n "${MNT_BOOT}" ]] && mountpoint -q "${MNT_BOOT}"; then
     umount -lf "${MNT_BOOT}"
   fi
@@ -60,9 +63,6 @@ cleanup() {
   if [[ -n "${LOOP_OUTPUT}" ]]; then
     losetup -d "${LOOP_OUTPUT}" || true
   fi
-  if [[ -n "${LOOP_ARMBIAN}" ]]; then
-    losetup -d "${LOOP_ARMBIAN}" || true
-  fi
   if [[ -n "${WORKDIR_CREATED}" && -d "${WORKDIR_CREATED}" ]]; then
     rm -rf "${WORKDIR_CREATED}" || true
   fi
@@ -79,7 +79,8 @@ require_root() {
 
 check_deps() {
   local deps=(
-    debootstrap qemu-aarch64-static parted losetup mkfs.vfat mkfs.btrfs mount rsync xz chroot lsblk
+    debootstrap qemu-aarch64-static parted losetup mkfs.vfat mkfs.btrfs mount mountpoint
+    rsync xz chroot lsblk git make aarch64-linux-gnu-gcc bc bison flex openssl dtc swig python3
   )
   local missing=()
 
@@ -88,9 +89,7 @@ check_deps() {
       missing+=("${d}")
     fi
   done
-  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-    missing+=("wget/curl")
-  fi
+
   if [[ "${#missing[@]}" -ne 0 ]]; then
     echo "缺少依赖命令: ${missing[*]}"
     echo "请先安装依赖后重试（见 README.md）"
@@ -164,12 +163,40 @@ parse_args() {
         WORKDIR="$2"
         shift 2
         ;;
-      --armbian-url)
-        ARMBIAN_URL="$2"
-        shift 2
-        ;;
       --root-pass)
         ROOT_PASS="$2"
+        shift 2
+        ;;
+      --kernel-repo)
+        KERNEL_REPO="$2"
+        shift 2
+        ;;
+      --kernel-ref)
+        KERNEL_REF="$2"
+        shift 2
+        ;;
+      --kernel-defconfig)
+        KERNEL_DEFCONFIG="$2"
+        shift 2
+        ;;
+      --uboot-repo)
+        UBOOT_REPO="$2"
+        shift 2
+        ;;
+      --uboot-ref)
+        UBOOT_REF="$2"
+        shift 2
+        ;;
+      --atf-repo)
+        ATF_REPO="$2"
+        shift 2
+        ;;
+      --atf-ref)
+        ATF_REF="$2"
+        shift 2
+        ;;
+      --jobs)
+        JOBS="$2"
         shift 2
         ;;
       *)
@@ -190,6 +217,21 @@ validate_args() {
       exit 1
       ;;
   esac
+
+  if [[ "${ARCH}" != "arm64" ]]; then
+    echo "当前脚本仅支持 --arch arm64"
+    exit 1
+  fi
+
+  if ! [[ "${JOBS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "无效参数: --jobs ${JOBS} (必须为正整数)"
+    exit 1
+  fi
+
+  if [[ -z "${KERNEL_DEFCONFIG}" ]]; then
+    echo "无效参数: --kernel-defconfig 不能为空"
+    exit 1
+  fi
 }
 
 init_workdir() {
@@ -199,11 +241,16 @@ init_workdir() {
   else
     WORKDIR_CREATED=$(mktemp -d /tmp/opi-build-XXXX)
   fi
+
   ASSETS_DIR="${WORKDIR_CREATED}/assets"
-  ARMBIAN_CACHE_DIR="${WORKDIR_CREATED}/cache"
+  SRC_DIR="${WORKDIR_CREATED}/src"
+  KERNEL_SRC_DIR="${SRC_DIR}/linux"
+  UBOOT_SRC_DIR="${SRC_DIR}/u-boot"
+  ATF_SRC_DIR="${SRC_DIR}/arm-trusted-firmware"
   MNT_ROOT="${WORKDIR_CREATED}/rootfs"
   MNT_BOOT="${WORKDIR_CREATED}/rootfs/boot"
-  mkdir -p "${ASSETS_DIR}" "${ARMBIAN_CACHE_DIR}" "${MNT_ROOT}"
+
+  mkdir -p "${ASSETS_DIR}/dtb" "${SRC_DIR}" "${MNT_ROOT}"
   log "工作目录: ${WORKDIR_CREATED}"
 }
 
@@ -213,210 +260,94 @@ read_root_password() {
   fi
 }
 
-require_tools_for_download() {
-  if command -v curl >/dev/null 2>&1; then
+clone_repo() {
+  local repo="$1"
+  local ref="$2"
+  local dst="$3"
+
+  rm -rf "${dst}"
+
+  if git clone --depth 1 --branch "${ref}" "${repo}" "${dst}"; then
     return
   fi
-  if command -v wget >/dev/null 2>&1; then
-    return
-  fi
-  echo "缺少下载工具: curl 或 wget"
-  exit 1
+
+  rm -rf "${dst}"
+  git clone --depth 1 "${repo}" "${dst}"
+  git -C "${dst}" fetch --depth 1 origin "${ref}"
+  git -C "${dst}" checkout --detach FETCH_HEAD
 }
 
-download_armbian_minimal() {
-  require_tools_for_download
-  log "下载 Armbian 资产: ${ARMBIAN_URL}"
+fetch_sources() {
+  log "获取源码"
+  clone_repo "${ATF_REPO}" "${ATF_REF}" "${ATF_SRC_DIR}"
+  clone_repo "${UBOOT_REPO}" "${UBOOT_REF}" "${UBOOT_SRC_DIR}"
+  clone_repo "${KERNEL_REPO}" "${KERNEL_REF}" "${KERNEL_SRC_DIR}"
+}
 
-  local resolved_url="${ARMBIAN_URL}"
-  local final_url=""
-  local direct_file="${ARMBIAN_CACHE_DIR}/armbian.img.xz"
-
-  if [[ ! "${resolved_url}" =~ \.img\.xz($|[?#]) ]]; then
-    if [[ -f "${direct_file}" ]] && xz -t "${direct_file}" >/dev/null 2>&1; then
-      ARMBIAN_IMG_XZ="${direct_file}"
-      log "使用缓存: ${ARMBIAN_IMG_XZ}"
-      return
-    fi
-
-    log "尝试将下载链接直接作为镜像文件处理"
-    if command -v curl >/dev/null 2>&1; then
-      if curl -fL "${ARMBIAN_URL}" -o "${direct_file}"; then
-        if xz -t "${direct_file}" >/dev/null 2>&1; then
-          ARMBIAN_IMG_XZ="${direct_file}"
-          return
-        fi
-      fi
-    else
-      if wget -O "${direct_file}" "${ARMBIAN_URL}"; then
-        if xz -t "${direct_file}" >/dev/null 2>&1; then
-          ARMBIAN_IMG_XZ="${direct_file}"
-          return
-        fi
-      fi
-    fi
-    rm -f "${direct_file}"
-  fi
-
-  if [[ ! "${resolved_url}" =~ \.img\.xz($|[?#]) ]]; then
-    if command -v curl >/dev/null 2>&1; then
-      final_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "${ARMBIAN_URL}" 2>/dev/null || true)
-    else
-      final_url=$(wget --max-redirect=20 --server-response --spider "${ARMBIAN_URL}" 2>&1 | awk '/^  Location: / {print $2}' | tail -n1 | tr -d '\r' || true)
-    fi
-    if [[ "${final_url}" =~ \.img\.xz($|[?#]) ]]; then
-      resolved_url="${final_url}"
-    fi
-  fi
-
-  if [[ ! "${resolved_url}" =~ \.img\.xz($|[?#]) ]]; then
-    log "解析 Armbian 下载页面，查找 .img.xz"
-    local page_file
-    page_file=$(mktemp "${WORKDIR_CREATED}/armbian-page-XXXXXX")
-    if command -v curl >/dev/null 2>&1; then
-      curl -fsSL "${ARMBIAN_URL}" -o "${page_file}"
-    else
-      wget -qO "${page_file}" "${ARMBIAN_URL}"
-    fi
-    resolved_url=$(grep -aoE 'https?://[^"'\''[:space:]]+\.img\.xz([?#][^"'\''[:space:]]*)?' "${page_file}" | head -n1 || true)
-    if [[ -z "${resolved_url}" ]]; then
-      local href
-      href=$(grep -aoE "href=['\"][^'\"]+\\.img\\.xz([?#][^'\"]*)?['\"]" "${page_file}" | head -n1 | sed -E "s/^href=['\"]//; s/['\"]$//" || true)
-      if [[ -n "${href}" ]]; then
-        if [[ "${href}" =~ ^https?:// ]]; then
-          resolved_url="${href}"
-        else
-          resolved_url="${ARMBIAN_URL%/}/${href}"
-        fi
-      fi
-    fi
-    if [[ -z "${resolved_url}" ]]; then
-      local token
-      token=$(grep -aoE '[A-Za-z0-9._/-]+\.img\.xz([?#][A-Za-z0-9._=&%-]+)?' "${page_file}" | head -n1 || true)
-      if [[ -n "${token}" ]]; then
-        resolved_url="${ARMBIAN_URL%/}/${token#./}"
-      fi
-    fi
-    rm -f "${page_file}"
-  fi
-
-  if [[ -z "${resolved_url}" || ! "${resolved_url}" =~ \.img\.xz($|[?#]) ]]; then
-    echo "无法解析 Armbian 镜像下载地址，请检查 --armbian-url"
+build_atf() {
+  log "编译 ARM Trusted Firmware"
+  make -C "${ATF_SRC_DIR}" -j"${JOBS}" CROSS_COMPILE=aarch64-linux-gnu- PLAT=sun50i_h616 DEBUG=0 bl31
+  ATF_BL31="${ATF_SRC_DIR}/build/sun50i_h616/release/bl31.bin"
+  if [[ ! -f "${ATF_BL31}" ]]; then
+    echo "编译 ATF 失败: ${ATF_BL31} 不存在"
     exit 1
   fi
+}
 
-  local file_name
-  file_name=$(basename "${resolved_url%%\?*}")
-  if [[ -z "${file_name}" || ! "${file_name}" =~ \.img\.xz$ ]]; then
-    file_name="armbian.img.xz"
+build_uboot() {
+  log "编译 U-Boot"
+  make -C "${UBOOT_SRC_DIR}" distclean >/dev/null 2>&1 || true
+  make -C "${UBOOT_SRC_DIR}" CROSS_COMPILE=aarch64-linux-gnu- orangepi_zero2_defconfig
+  make -C "${UBOOT_SRC_DIR}" -j"${JOBS}" CROSS_COMPILE=aarch64-linux-gnu- BL31="${ATF_BL31}"
+
+  local uboot_bin="${UBOOT_SRC_DIR}/u-boot-sunxi-with-spl.bin"
+  if [[ ! -f "${uboot_bin}" ]]; then
+    echo "编译 U-Boot 失败: ${uboot_bin} 不存在"
+    exit 1
   fi
-  ARMBIAN_IMG_XZ="${ARMBIAN_CACHE_DIR}/${file_name}"
-  if [[ -f "${ARMBIAN_IMG_XZ}" ]]; then
-    log "使用缓存: ${ARMBIAN_IMG_XZ}"
-    return
-  fi
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL "${resolved_url}" -o "${ARMBIAN_IMG_XZ}"
+  cp "${uboot_bin}" "${ASSETS_DIR}/uboot.bin"
+}
+
+build_kernel() {
+  log "编译 Linux 内核"
+  make -C "${KERNEL_SRC_DIR}" mrproper
+  if make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- "${KERNEL_DEFCONFIG}" >/dev/null 2>&1; then
+    log "使用内核配置: ${KERNEL_DEFCONFIG}"
   else
-    wget -O "${ARMBIAN_IMG_XZ}" "${resolved_url}"
+    log "内核不支持 ${KERNEL_DEFCONFIG}，回退到 defconfig"
+    make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
   fi
-  if ! xz -t "${ARMBIAN_IMG_XZ}" >/dev/null 2>&1; then
-    echo "下载文件不是有效的 .xz 镜像，请检查 --armbian-url"
-    exit 1
-  fi
-}
 
-extract_armbian_assets() {
-  log "解压 Armbian 镜像"
-  ARMBIAN_IMG="${ARMBIAN_CACHE_DIR}/armbian.img"
-  if [[ ! -f "${ARMBIAN_IMG}" ]]; then
-    xz -dkc "${ARMBIAN_IMG_XZ}" > "${ARMBIAN_IMG}"
+  if [[ -x "${KERNEL_SRC_DIR}/scripts/config" ]]; then
+    "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_SRC_DIR}/.config" \
+      --enable BLK_DEV_INITRD \
+      --enable BTRFS_FS \
+      --enable BTRFS_FS_POSIX_ACL
   fi
-  LOOP_ARMBIAN=$(losetup -Pf --show "${ARMBIAN_IMG}")
-  log "Armbian loop: ${LOOP_ARMBIAN}"
 
-  local armbian_parts=()
-  local p
-  for p in "${LOOP_ARMBIAN}"p*; do
-    if [[ -e "${p}" ]]; then
-      armbian_parts+=("${p}")
-    fi
-  done
-  if [[ "${#armbian_parts[@]}" -eq 0 ]]; then
-    echo "未找到 Armbian 镜像分区: ${LOOP_ARMBIAN}p*"
+  make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+  make -C "${KERNEL_SRC_DIR}" -j"${JOBS}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image modules dtbs
+
+  KERNEL_RELEASE=$(make -s -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kernelrelease)
+  if [[ -z "${KERNEL_RELEASE}" ]]; then
+    echo "无法确定内核版本 (kernelrelease)"
     exit 1
   fi
 
-  ARMBIAN_BOOT_MNT="${WORKDIR_CREATED}/armbian-boot"
-  mkdir -p "${ARMBIAN_BOOT_MNT}"
+  cp "${KERNEL_SRC_DIR}/arch/arm64/boot/Image" "${ASSETS_DIR}/${ASSET_KERNEL_NAME}"
 
-  local selected_part=""
-  local dtb_found=""
-  for p in "${armbian_parts[@]}"; do
-    if ! mount -o ro "${p}" "${ARMBIAN_BOOT_MNT}" 2>/dev/null; then
-      continue
-    fi
-    dtb_found=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
-    if [[ -n "${dtb_found}" ]]; then
-      selected_part="${p}"
-      break
-    fi
-    umount "${ARMBIAN_BOOT_MNT}" || true
-  done
-
-  if [[ -z "${selected_part}" ]]; then
-    echo "未在 Armbian 各分区中找到 DTB: sun50i-h616-orangepi-zero2.dtb"
+  local dtb_file="${KERNEL_SRC_DIR}/arch/arm64/boot/dts/allwinner/sun50i-h616-orangepi-zero2.dtb"
+  if [[ ! -f "${dtb_file}" ]]; then
+    dtb_file=$(find "${KERNEL_SRC_DIR}/arch/arm64/boot/dts" -type f -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
+  fi
+  if [[ -z "${dtb_file}" || ! -f "${dtb_file}" ]]; then
+    echo "未找到 DTB: sun50i-h616-orangepi-zero2.dtb"
     exit 1
   fi
-  log "使用分区提取启动资产: ${selected_part}"
 
-  local kernel_path
-  kernel_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "Image" | head -n1 || true)
-  if [[ -z "${kernel_path}" ]]; then
-    kernel_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "Image-*" | head -n1 || true)
-  fi
-  if [[ -z "${kernel_path}" ]]; then
-    kernel_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "vmlinuz*" | head -n1 || true)
-  fi
-  if [[ -z "${kernel_path}" ]]; then
-    kernel_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "zImage*" | head -n1 || true)
-  fi
-  if [[ -z "${kernel_path}" ]]; then
-    echo "未找到内核文件（Image/Image-*/vmlinuz*/zImage*），启动分区结构可能已变化。"
-    exit 1
-  fi
-  ASSET_KERNEL_NAME=$(basename "${kernel_path}")
-  cp "${kernel_path}" "${ASSETS_DIR}/${ASSET_KERNEL_NAME}"
-
-  local initrd_path
-  initrd_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "uInitrd" | head -n1 || true)
-  if [[ -z "${initrd_path}" ]]; then
-    initrd_path=$(find "${ARMBIAN_BOOT_MNT}" -maxdepth 12 -type f -name "initrd.img*" | head -n1 || true)
-  fi
-  if [[ -z "${initrd_path}" ]]; then
-    echo "未找到 initrd（uInitrd 或 initrd.img*）"
-    exit 1
-  fi
-  ASSET_INITRD_NAME=$(basename "${initrd_path}")
-  cp "${initrd_path}" "${ASSETS_DIR}/${ASSET_INITRD_NAME}"
-
-  local dtb_src_dir
-  dtb_src_dir=$(dirname "${dtb_found}")
-  while [[ "${dtb_src_dir}" != "/" && "$(basename "${dtb_src_dir}")" != "dtb" ]]; do
-    dtb_src_dir=$(dirname "${dtb_src_dir}")
-  done
-  if [[ "${dtb_src_dir}" == "/" ]]; then
-    dtb_src_dir=$(dirname "${dtb_found}")
-  fi
-  mkdir -p "${ASSETS_DIR}/dtb"
-  rsync -a "${dtb_src_dir}/" "${ASSETS_DIR}/dtb/"
-
-  dd if="${ARMBIAN_IMG}" of="${ASSETS_DIR}/uboot.bin" bs=1M count=16
-  umount "${ARMBIAN_BOOT_MNT}"
-  rmdir "${ARMBIAN_BOOT_MNT}"
-  ARMBIAN_BOOT_MNT=""
-  losetup -d "${LOOP_ARMBIAN}"
-  LOOP_ARMBIAN=""
+  cp "${dtb_file}" "${ASSETS_DIR}/dtb/"
+  cp "${KERNEL_SRC_DIR}/System.map" "${ASSETS_DIR}/System.map-${KERNEL_RELEASE}"
+  cp "${KERNEL_SRC_DIR}/.config" "${ASSETS_DIR}/config-${KERNEL_RELEASE}"
 }
 
 create_blank_image() {
@@ -542,63 +473,87 @@ SERVICE
 
 configure_rootfs_in_chroot() {
   log "配置 rootfs"
-  cat <<EOF > "${MNT_ROOT}/etc/hostname"
+  cat <<EOF2 > "${MNT_ROOT}/etc/hostname"
 ${HOSTNAME}
-EOF
-  cat <<EOF > "${MNT_ROOT}/etc/hosts"
+EOF2
+  cat <<EOF2 > "${MNT_ROOT}/etc/hosts"
 127.0.0.1\tlocalhost
 127.0.1.1\t${HOSTNAME}
-EOF
+EOF2
 
-  cat <<EOF > "${MNT_ROOT}/etc/apt/sources.list"
+  cat <<EOF2 > "${MNT_ROOT}/etc/apt/sources.list"
 deb ${MIRROR} ${SUITE} main contrib non-free non-free-firmware
 deb ${MIRROR}-security ${SUITE}-security main contrib non-free non-free-firmware
 deb ${MIRROR} ${SUITE}-updates main contrib non-free non-free-firmware
-EOF
+EOF2
 
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
   chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted util-linux"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
 
   mkdir -p "${MNT_ROOT}/etc/ssh/sshd_config.d"
-  cat <<'EOF' > "${MNT_ROOT}/etc/ssh/sshd_config.d/99-root-login.conf"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/ssh/sshd_config.d/99-root-login.conf"
 PermitRootLogin yes
 PasswordAuthentication yes
-EOF
+EOF2
 
   echo "root:${ROOT_PASS}" | chroot "${MNT_ROOT}" chpasswd
 
-  cat <<'EOF' > "${MNT_ROOT}/etc/fstab"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/fstab"
 /dev/mmcblk0p2 / btrfs defaults,compress=zstd,noatime 0 1
 /dev/mmcblk0p1 /boot vfat defaults 0 2
-EOF
+EOF2
 
   write_resize_script
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable opi-firstboot-resize.service"
 }
 
-install_boot_assets() {
-  log "安装 boot 资产"
+install_compiled_kernel() {
+  log "安装自编译内核模块"
+  make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+    INSTALL_MOD_PATH="${MNT_ROOT}" DEPMOD=/bin/true modules_install
+
   cp "${ASSETS_DIR}/${ASSET_KERNEL_NAME}" "${MNT_BOOT}/${ASSET_KERNEL_NAME}"
   mkdir -p "${MNT_BOOT}/dtb"
   rsync -a "${ASSETS_DIR}/dtb/" "${MNT_BOOT}/dtb/"
-  cp "${ASSETS_DIR}/${ASSET_INITRD_NAME}" "${MNT_BOOT}/${ASSET_INITRD_NAME}"
-  mkdir -p "${MNT_BOOT}/extlinux"
+
+  cp "${ASSETS_DIR}/${ASSET_KERNEL_NAME}" "${MNT_ROOT}/boot/vmlinuz-${KERNEL_RELEASE}"
+  cp "${ASSETS_DIR}/System.map-${KERNEL_RELEASE}" "${MNT_ROOT}/boot/System.map-${KERNEL_RELEASE}"
+  cp "${ASSETS_DIR}/config-${KERNEL_RELEASE}" "${MNT_ROOT}/boot/config-${KERNEL_RELEASE}"
+
+  chroot "${MNT_ROOT}" /bin/bash -c "depmod -a '${KERNEL_RELEASE}'"
+  chroot "${MNT_ROOT}" /bin/bash -c "update-initramfs -c -k '${KERNEL_RELEASE}'"
+
+  ASSET_INITRD_NAME="initrd.img-${KERNEL_RELEASE}"
+  if [[ ! -f "${MNT_BOOT}/${ASSET_INITRD_NAME}" ]]; then
+    echo "未生成 initrd: /boot/${ASSET_INITRD_NAME}"
+    exit 1
+  fi
+}
+
+install_boot_assets() {
+  log "写入 extlinux 配置"
   local dtb_rel
-  dtb_rel=$(find "${ASSETS_DIR}/dtb" -name "sun50i-h616-orangepi-zero2.dtb" | head -n1)
-  dtb_rel=${dtb_rel#"${ASSETS_DIR}/dtb/"}
-  cat <<EOF > "${MNT_BOOT}/extlinux/extlinux.conf"
+  dtb_rel=$(find "${MNT_BOOT}/dtb" -type f -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
+  if [[ -z "${dtb_rel}" ]]; then
+    echo "启动分区未找到 DTB: sun50i-h616-orangepi-zero2.dtb"
+    exit 1
+  fi
+  dtb_rel=${dtb_rel#"${MNT_BOOT}/"}
+
+  mkdir -p "${MNT_BOOT}/extlinux"
+  cat <<EOF2 > "${MNT_BOOT}/extlinux/extlinux.conf"
 LABEL DebianTrixie
   LINUX /${ASSET_KERNEL_NAME}
   INITRD /${ASSET_INITRD_NAME}
-  FDT /dtb/${dtb_rel}
+  FDT /${dtb_rel}
   APPEND root=/dev/mmcblk0p2 rootfstype=btrfs rootwait rw console=ttyS0,115200 console=tty1
-EOF
+EOF2
 }
 
 install_uboot_to_output_image() {
   log "写入 U-Boot"
-  dd if="${ASSETS_DIR}/uboot.bin" of="${LOOP_OUTPUT}" bs=1M conv=fsync
+  dd if="${ASSETS_DIR}/uboot.bin" of="${LOOP_OUTPUT}" bs=1k seek=8 conv=fsync,notrunc
 }
 
 finalize_image() {
@@ -606,6 +561,10 @@ finalize_image() {
   log "检查生成结果"
   if [[ ! -f "${MNT_ROOT}/boot/${ASSET_KERNEL_NAME}" ]]; then
     echo "校验失败: /boot/${ASSET_KERNEL_NAME} 不存在"
+    exit 1
+  fi
+  if [[ -z "${ASSET_INITRD_NAME}" || ! -f "${MNT_ROOT}/boot/${ASSET_INITRD_NAME}" ]]; then
+    echo "校验失败: /boot/${ASSET_INITRD_NAME} 不存在"
     exit 1
   fi
   if [[ ! -f "${MNT_ROOT}/boot/extlinux/extlinux.conf" ]]; then
@@ -640,22 +599,22 @@ print_flash_hint() {
   local out_file="${OUTPUT}"
   if [[ "${COMPRESS}" == "xz" ]]; then
     out_file="${OUTPUT}.xz"
-    cat <<EOF
+    cat <<EOF2
 镜像生成完成: ${out_file}
 
 烧录示例:
   xz -d ${out_file}
   sudo dd if=${OUTPUT} of=/dev/sdX bs=4M conv=fsync status=progress
-EOF
+EOF2
     return
   fi
 
-  cat <<EOF
+  cat <<EOF2
 镜像生成完成: ${out_file}
 
 烧录示例:
   sudo dd if=${out_file} of=/dev/sdX bs=4M conv=fsync status=progress
-EOF
+EOF2
 }
 
 main() {
@@ -666,14 +625,17 @@ main() {
   ensure_loop_support
   init_workdir
   read_root_password
-  download_armbian_minimal
-  extract_armbian_assets
+  fetch_sources
+  build_atf
+  build_uboot
+  build_kernel
   create_blank_image
   setup_loop_for_output_image
   format_partitions
   mount_partitions
   build_debian_rootfs
   configure_rootfs_in_chroot
+  install_compiled_kernel
   install_boot_assets
   install_uboot_to_output_image
   finalize_image
