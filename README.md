@@ -10,6 +10,7 @@
 - root 分区为 btrfs，挂载选项：`compress=zstd,noatime`。
 - 启用 SSH（允许 root 密码登录）、NetworkManager、systemd-timesyncd。
 - 首次启动自动扩容 `/dev/mmcblk0p2`，并扩展 btrfs 文件系统。
+- **镜像优化**：使用 `--no-install-recommends`、清理缓存文档、精简内核模块、极限压缩，大幅减小镜像体积。
 
 ## 依赖
 

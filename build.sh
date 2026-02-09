@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0")
 
-IMAGE_SIZE="4G"
+IMAGE_SIZE="3G"
 SUITE="trixie"
 ARCH="arm64"
 HOSTNAME="orangepi-zero2"
@@ -421,9 +421,9 @@ create_blank_image() {
   log "创建镜像: ${OUTPUT}"
   truncate -s "${IMAGE_SIZE}" "${OUTPUT}"
   parted -s "${OUTPUT}" mklabel msdos
-  parted -s "${OUTPUT}" mkpart primary fat32 1MiB 513MiB
+  parted -s "${OUTPUT}" mkpart primary fat32 1MiB 257MiB
   parted -s "${OUTPUT}" set 1 boot on
-  parted -s "${OUTPUT}" mkpart primary btrfs 513MiB 100%
+  parted -s "${OUTPUT}" mkpart primary btrfs 257MiB 100%
   log "分区信息:"
   parted -s "${OUTPUT}" unit MiB print || true
 }
@@ -555,8 +555,15 @@ deb ${MIRROR} ${SUITE}-updates main contrib non-free non-free-firmware
 EOF2
 
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
-  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted util-linux firmware-linux firmware-realtek firmware-misc-nonfree wireless-tools wpasupplicant"
+  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted firmware-linux firmware-realtek firmware-misc-nonfree wireless-tools wpasupplicant"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
+
+  # 配置 initramfs 以支持 btrfs
+  mkdir -p "${MNT_ROOT}/etc/initramfs-tools"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/initramfs-tools/conf.d/btrfs"
+# 添加 btrfs 模块到 initramfs
+MODULES=most
+EOF2
 
   mkdir -p "${MNT_ROOT}/etc/ssh/sshd_config.d"
   cat <<'EOF2' > "${MNT_ROOT}/etc/ssh/sshd_config.d/99-root-login.conf"
@@ -573,6 +580,30 @@ EOF2
 
   write_resize_script
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable opi-firstboot-resize.service"
+  
+  log "清理系统以减小镜像大小"
+  chroot "${MNT_ROOT}" /bin/bash -c "apt-get clean"
+  chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /var/lib/apt/lists/*"
+  chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /tmp/* /var/tmp/*"
+  chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/info/*"
+  chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /usr/share/locale/* /usr/share/i18n/locales/*"
+  chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /var/cache/apt/archives/*.deb"
+  chroot "${MNT_ROOT}" /bin/bash -c "find /var/log -type f -exec truncate -s 0 {} \;"
+  chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /usr/share/pixmaps/* /usr/share/icons/*"
+  chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /usr/share/sounds/*"
+  
+  # 移除不必要的内核模块（保留网络和存储相关）
+  log "精简内核模块"
+  chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules -name '*.ko' -path '*/kernel/sound/*' -delete" || true
+  chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules -name '*.ko' -path '*/kernel/drivers/gpu/*' -delete" || true
+  chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules -name '*.ko' -path '*/kernel/drivers/media/*' -delete" || true
+  chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules -name '*.ko' -path '*/kernel/drivers/staging/*' -delete" || true
+  
+  # 重新生成模块依赖
+  KERNEL_VER=$(ls "${MNT_ROOT}/lib/modules" | head -n1)
+  if [[ -n "${KERNEL_VER}" ]]; then
+    chroot "${MNT_ROOT}" /bin/bash -c "depmod -a ${KERNEL_VER}" || true
+  fi
 }
 
 install_compiled_kernel() {
@@ -644,6 +675,11 @@ finalize_image() {
   fi
   log "校验通过"
 
+  log "优化镜像压缩率（填充空白空间）"
+  dd if=/dev/zero of="${MNT_ROOT}/zero.fill" bs=1M 2>/dev/null || true
+  sync
+  rm -f "${MNT_ROOT}/zero.fill"
+
   log "卸载并释放资源"
   umount -lf "${MNT_BOOT}"
   umount -lf "${MNT_ROOT}/dev/pts" || true
@@ -657,8 +693,8 @@ finalize_image() {
 
 compress_output() {
   if [[ "${COMPRESS}" == "xz" ]]; then
-    log "压缩镜像"
-    xz -T0 -z -9 "${OUTPUT}"
+    log "压缩镜像（使用极限压缩）"
+    xz -T0 -z -9 --extreme "${OUTPUT}"
   fi
 }
 
