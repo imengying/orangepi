@@ -424,19 +424,19 @@ build_kernel() {
       --enable PHY_SUN4I_USB \
       --enable EXTCON \
       --enable EXTCON_USB_GPIO \
-      --enable WLAN \
-      --enable CFG80211 \
-      --enable MAC80211 \
-      --enable WIRELESS \
-      --module RTL8XXXU \
-      --module RTW88 \
-      --module RTW88_8822B \
-      --module RTW88_8822BS \
-      --module RTW88_8822C \
-      --module RTW88_8822CS \
-      --module RTW89 \
-      --module RTW89_8852A \
-      --module RTW89_8852AE \
+      --disable WLAN \
+      --disable CFG80211 \
+      --disable MAC80211 \
+      --disable WIRELESS \
+      --disable RTL8XXXU \
+      --disable RTW88 \
+      --disable RTW88_8822B \
+      --disable RTW88_8822BS \
+      --disable RTW88_8822C \
+      --disable RTW88_8822CS \
+      --disable RTW89 \
+      --disable RTW89_8852A \
+      --disable RTW89_8852AE \
       --enable THERMAL \
       --enable CPU_THERMAL \
       --enable THERMAL_GOV_STEP_WISE \
@@ -484,9 +484,9 @@ create_blank_image() {
   log "创建镜像: ${OUTPUT}"
   truncate -s "${IMAGE_SIZE}" "${OUTPUT}"
   parted -s "${OUTPUT}" mklabel msdos
-  parted -s "${OUTPUT}" mkpart primary fat32 1MiB 257MiB
+  parted -s "${OUTPUT}" mkpart primary fat32 1MiB 129MiB
   parted -s "${OUTPUT}" set 1 boot on
-  parted -s "${OUTPUT}" mkpart primary btrfs 257MiB 100%
+  parted -s "${OUTPUT}" mkpart primary btrfs 129MiB 100%
   log "分区信息:"
   parted -s "${OUTPUT}" unit MiB print || true
 }
@@ -662,6 +662,7 @@ EOF2
   mkdir -p "${MNT_ROOT}/etc/systemd/system/systemd-journald.service.d"
   cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/systemd-journald.service.d/override.conf"
 [Service]
+ImportCredential=
 LoadCredential=
 LoadCredentialEncrypted=
 SetCredential=
@@ -671,6 +672,7 @@ EOF2
   mkdir -p "${MNT_ROOT}/etc/systemd/system/serial-getty@.service.d"
   cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/serial-getty@.service.d/override.conf"
 [Service]
+ImportCredential=
 LoadCredential=
 LoadCredentialEncrypted=
 SetCredential=
@@ -680,6 +682,7 @@ EOF2
   mkdir -p "${MNT_ROOT}/etc/systemd/system/getty@.service.d"
   cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/getty@.service.d/override.conf"
 [Service]
+ImportCredential=
 LoadCredential=
 LoadCredentialEncrypted=
 SetCredential=
@@ -735,7 +738,7 @@ EOF2
   cat <<'EOF2' > "${MNT_ROOT}/etc/default/zramswap"
 # zram 配置
 # 使用总内存百分比
-PERCENT=50
+PERCENT=40
 # 压缩算法（lz4 速度快，zstd 压缩率高）
 ALGO=lz4
 # 优先级
@@ -1025,22 +1028,11 @@ print_flash_hint() {
   local out_file="${OUTPUT}"
   if [[ "${COMPRESS}" == "xz" ]]; then
     out_file="${OUTPUT}.xz"
-    cat <<EOF2
-镜像生成完成: ${out_file}
-
-烧录示例:
-  xz -d ${out_file}
-  sudo dd if=${OUTPUT} of=/dev/sdX bs=4M conv=fsync status=progress
-EOF2
+    echo "镜像生成完成: ${out_file}"
     return
   fi
 
-  cat <<EOF2
-镜像生成完成: ${out_file}
-
-烧录示例:
-  sudo dd if=${out_file} of=/dev/sdX bs=4M conv=fsync status=progress
-EOF2
+  echo "镜像生成完成: ${out_file}"
 }
 
 main() {
