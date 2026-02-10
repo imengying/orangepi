@@ -373,11 +373,19 @@ build_uboot() {
   log "编译 U-Boot"
   make -C "${UBOOT_SRC_DIR}" distclean >/dev/null 2>&1 || true
   make -C "${UBOOT_SRC_DIR}" CROSS_COMPILE=aarch64-linux-gnu- orangepi_zero2_defconfig
+  set_uboot_dtb_led_defaults
   if [[ -x "${UBOOT_SRC_DIR}/scripts/config" ]]; then
     "${UBOOT_SRC_DIR}/scripts/config" --file "${UBOOT_SRC_DIR}/.config" \
-      --disable TOOLS_MKEFICAPSULE || true
-    make -C "${UBOOT_SRC_DIR}" CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+      --disable TOOLS_MKEFICAPSULE \
+      --set-val BOOTDELAY 0 || true
+  else
+    if grep -q '^CONFIG_BOOTDELAY=' "${UBOOT_SRC_DIR}/.config"; then
+      sed -i 's/^CONFIG_BOOTDELAY=.*/CONFIG_BOOTDELAY=0/' "${UBOOT_SRC_DIR}/.config"
+    else
+      echo "CONFIG_BOOTDELAY=0" >> "${UBOOT_SRC_DIR}/.config"
+    fi
   fi
+  make -C "${UBOOT_SRC_DIR}" CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
   make -C "${UBOOT_SRC_DIR}" -j"${JOBS}" CROSS_COMPILE=aarch64-linux-gnu- BL31="${ATF_BL31}"
 
   local uboot_bin="${UBOOT_SRC_DIR}/u-boot-sunxi-with-spl.bin"
@@ -388,9 +396,234 @@ build_uboot() {
   cp "${uboot_bin}" "${ASSETS_DIR}/uboot.bin"
 }
 
+set_uboot_dtb_led_defaults() {
+  local dts_root="${UBOOT_SRC_DIR}/arch/arm/dts"
+  if [[ ! -d "${dts_root}" ]]; then
+    echo "未找到 U-Boot DTS 目录: ${dts_root}"
+    exit 1
+  fi
+
+  log "修改 U-Boot 设备树 LED 默认状态（红灯关闭，绿灯点亮）"
+  python3 - "${dts_root}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+dts_root = Path(sys.argv[1])
+files = list(dts_root.glob("sun50i-h616-orangepi-zero2*.dts"))
+files += list(dts_root.glob("sun50i-h616-orangepi-zero2*.dtsi"))
+if not files:
+    files = sorted(dts_root.glob("*.dts")) + sorted(dts_root.glob("*.dtsi"))
+
+if not files:
+    raise SystemExit("U-Boot DTS 目录中没有可处理的 dts/dtsi 文件")
+
+red_labels = ["orangepi:red:power", "red:power"]
+green_labels = ["orangepi:green:status", "green:status"]
+
+
+def find_label_line(lines, labels):
+    for i, line in enumerate(lines):
+        for label in labels:
+            if f'label = "{label}";' in line:
+                return i
+    return -1
+
+
+def find_block_bounds(lines, label_idx):
+    start = -1
+    for i in range(label_idx, -1, -1):
+        if "{" in lines[i]:
+            start = i
+            break
+    if start < 0:
+        raise RuntimeError("无法定位 LED 节点开始位置")
+
+    depth = 0
+    for i in range(start, len(lines)):
+        depth += lines[i].count("{")
+        depth -= lines[i].count("}")
+        if depth == 0:
+            return start, i
+    raise RuntimeError("无法定位 LED 节点结束位置")
+
+
+def patch_node(lines, labels, trigger, state):
+    label_idx = find_label_line(lines, labels)
+    if label_idx < 0:
+        return lines, False
+
+    start, end = find_block_bounds(lines, label_idx)
+    block = lines[start:end + 1]
+
+    indent = None
+    for line in block:
+        if "label =" in line:
+            indent = re.match(r"^(\s*)", line).group(1)
+            break
+    if indent is None:
+        indent = re.match(r"^(\s*)", block[0]).group(1) + "\t"
+
+    new_block = []
+    for line in block[:-1]:
+        if re.search(r"\blinux,default-trigger\s*=", line):
+            continue
+        if re.search(r"\bdefault-state\s*=", line):
+            continue
+        new_block.append(line)
+
+    new_block.append(f'{indent}linux,default-trigger = "{trigger}";\n')
+    if state:
+        new_block.append(f'{indent}default-state = "{state}";\n')
+    new_block.append(block[-1])
+
+    lines[start:end + 1] = new_block
+    return lines, True
+
+
+red_done = False
+green_done = False
+patched_files = []
+
+for file_path in files:
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
+
+    lines = text.splitlines(keepends=True)
+    changed = False
+
+    if not red_done:
+        lines, ok = patch_node(lines, red_labels, "none", "off")
+        if ok:
+            red_done = True
+            changed = True
+
+    if not green_done:
+        lines, ok = patch_node(lines, green_labels, "heartbeat", "on")
+        if ok:
+            green_done = True
+            changed = True
+
+    if changed:
+        file_path.write_text("".join(lines), encoding="utf-8")
+        patched_files.append(str(file_path))
+
+    if red_done and green_done:
+        break
+
+if not red_done or not green_done:
+    missing = []
+    if not red_done:
+        missing.append("red:power")
+    if not green_done:
+        missing.append("green:status")
+    raise SystemExit("未在 U-Boot DTS 中找到 LED 标签: " + ", ".join(missing))
+
+print("Patched U-Boot DTS:", ", ".join(patched_files))
+PY
+}
+
+set_dtb_led_defaults() {
+  local dts_file="${KERNEL_SRC_DIR}/arch/arm64/boot/dts/allwinner/sun50i-h616-orangepi-zero2.dts"
+  if [[ ! -f "${dts_file}" ]]; then
+    dts_file=$(find "${KERNEL_SRC_DIR}/arch/arm64/boot/dts" -type f -name "sun50i-h616-orangepi-zero2.dts" | head -n1 || true)
+  fi
+  if [[ -z "${dts_file}" || ! -f "${dts_file}" ]]; then
+    echo "未找到 DTS: sun50i-h616-orangepi-zero2.dts"
+    exit 1
+  fi
+
+  log "修改设备树 LED 默认状态（红灯关闭，绿灯心跳）"
+  python3 - "${dts_file}" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    lines = f.readlines()
+
+
+def find_label_line(candidates):
+    for i, line in enumerate(lines):
+        for label in candidates:
+            if f'label = "{label}";' in line:
+                return i
+    return -1
+
+
+def find_block_bounds(label_idx):
+    start = -1
+    for i in range(label_idx, -1, -1):
+        if "{" in lines[i]:
+            start = i
+            break
+    if start < 0:
+        raise RuntimeError("无法定位 LED 节点开始位置")
+
+    depth = 0
+    for i in range(start, len(lines)):
+        depth += lines[i].count("{")
+        depth -= lines[i].count("}")
+        if depth == 0:
+            return start, i
+    raise RuntimeError("无法定位 LED 节点结束位置")
+
+
+def patch_node(label_candidates, trigger, state):
+    label_idx = find_label_line(label_candidates)
+    if label_idx < 0:
+        return False
+
+    start, end = find_block_bounds(label_idx)
+    block = lines[start:end + 1]
+
+    indent = None
+    for line in block:
+        if "label =" in line:
+            indent = re.match(r"^(\s*)", line).group(1)
+            break
+    if indent is None:
+        indent = re.match(r"^(\s*)", block[0]).group(1) + "\t"
+
+    new_block = []
+    for line in block[:-1]:
+        if re.search(r"\blinux,default-trigger\s*=", line):
+            continue
+        if re.search(r"\bdefault-state\s*=", line):
+            continue
+        new_block.append(line)
+
+    new_block.append(f'{indent}linux,default-trigger = "{trigger}";\n')
+    if state:
+        new_block.append(f'{indent}default-state = "{state}";\n')
+    new_block.append(block[-1])
+
+    lines[start:end + 1] = new_block
+    return True
+
+
+red_ok = patch_node(["orangepi:red:power", "red:power"], "none", "off")
+green_ok = patch_node(["orangepi:green:status", "green:status"], "heartbeat", None)
+
+if not red_ok or not green_ok:
+    missing = []
+    if not red_ok:
+        missing.append("red:power")
+    if not green_ok:
+        missing.append("green:status")
+    raise SystemExit("未在 DTS 中找到 LED 标签: " + ", ".join(missing))
+
+with open(path, "w", encoding="utf-8") as f:
+    f.writelines(lines)
+PY
+}
+
 build_kernel() {
   log "编译 Linux 内核"
   make -C "${KERNEL_SRC_DIR}" mrproper
+  set_dtb_led_defaults
   if make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- "${KERNEL_DEFCONFIG}" >/dev/null 2>&1; then
     log "使用内核配置: ${KERNEL_DEFCONFIG}"
   else
@@ -755,51 +988,7 @@ EOF2
   
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable zramswap.service"
   
-  # 配置 LED（红灯关闭，绿灯心跳）
-  log "配置 LED 行为"
-  cat <<'EOF2' > "${MNT_ROOT}/etc/rc.local"
-#!/bin/bash
-# 红灯关闭，绿灯心跳
-
-set_trigger() {
-  local led_dir="$1"
-  local mode="$2"
-  [[ -d "${led_dir}" ]] || return 0
-  echo "${mode}" > "${led_dir}/trigger" 2>/dev/null || true
-}
-
-set_brightness() {
-  local led_dir="$1"
-  local value="$2"
-  [[ -d "${led_dir}" ]] || return 0
-  echo "${value}" > "${led_dir}/brightness" 2>/dev/null || true
-}
-
-for led_dir in /sys/class/leds/*; do
-  [[ -d "${led_dir}" ]] || continue
-  led_base=$(basename "${led_dir}")
-
-  if [[ "${led_base}" == *"red"* ]] || [[ "${led_base}" == *"power"* ]]; then
-    set_trigger "${led_dir}" none
-    set_brightness "${led_dir}" 0
-    continue
-  fi
-
-  if [[ "${led_base}" == *"green"* ]] || [[ "${led_base}" == *"status"* ]]; then
-    set_trigger "${led_dir}" heartbeat
-  fi
-done
-
-# 如果上面的通用方法不工作，尝试具体路径
-set_trigger /sys/class/leds/orangepi:red:power none
-set_brightness /sys/class/leds/orangepi:red:power 0
-set_trigger /sys/class/leds/orangepi:green:status heartbeat
-
-exit 0
-EOF2
-  chmod +x "${MNT_ROOT}/etc/rc.local"
-  
-  # 创建 LED 调试脚本
+  # 创建 LED 调试脚本（默认行为由 U-Boot/内核设备树决定）
   cat <<'EOF2' > "${MNT_ROOT}/usr/local/bin/led-control"
 #!/bin/bash
 # LED 控制脚本
@@ -891,22 +1080,6 @@ case ${1:-show} in
 esac
 EOF2
   chmod +x "${MNT_ROOT}/usr/local/bin/led-control"
-  
-  # 创建 systemd 服务来运行 rc.local
-  cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/rc-local.service"
-[Unit]
-Description=LED Configuration
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=/etc/rc.local
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF2
-  chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable rc-local.service"
   
   log "清理系统以减小镜像大小"
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get clean"
