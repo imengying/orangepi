@@ -418,14 +418,26 @@ if not files:
 if not files:
     raise SystemExit("U-Boot DTS 目录中没有可处理的 dts/dtsi 文件")
 
-red_labels = ["orangepi:red:power", "red:power"]
-green_labels = ["orangepi:green:status", "green:status"]
+red_tokens = [
+    'label = "orangepi:red:power"',
+    'label = "red:power"',
+    "LED_FUNCTION_POWER",
+    'function = "power"',
+    "LED_COLOR_ID_RED",
+]
+green_tokens = [
+    'label = "orangepi:green:status"',
+    'label = "green:status"',
+    "LED_FUNCTION_STATUS",
+    'function = "status"',
+    "LED_COLOR_ID_GREEN",
+]
 
 
-def find_label_line(lines, labels):
+def find_anchor_line(lines, tokens):
     for i, line in enumerate(lines):
-        for label in labels:
-            if f'label = "{label}";' in line:
+        for token in tokens:
+            if token in line:
                 return i
     return -1
 
@@ -448,12 +460,12 @@ def find_block_bounds(lines, label_idx):
     raise RuntimeError("无法定位 LED 节点结束位置")
 
 
-def patch_node(lines, labels, trigger, state):
-    label_idx = find_label_line(lines, labels)
-    if label_idx < 0:
+def patch_node(lines, tokens, trigger, state):
+    anchor_idx = find_anchor_line(lines, tokens)
+    if anchor_idx < 0:
         return lines, False
 
-    start, end = find_block_bounds(lines, label_idx)
+    start, end = find_block_bounds(lines, anchor_idx)
     block = lines[start:end + 1]
 
     indent = None
@@ -495,13 +507,13 @@ for file_path in files:
     changed = False
 
     if not red_done:
-        lines, ok = patch_node(lines, red_labels, "none", "off")
+        lines, ok = patch_node(lines, red_tokens, "none", "off")
         if ok:
             red_done = True
             changed = True
 
     if not green_done:
-        lines, ok = patch_node(lines, green_labels, "heartbeat", "on")
+        lines, ok = patch_node(lines, green_tokens, "heartbeat", "on")
         if ok:
             green_done = True
             changed = True
@@ -519,9 +531,12 @@ if not red_done or not green_done:
         missing.append("red:power")
     if not green_done:
         missing.append("green:status")
-    raise SystemExit("未在 U-Boot DTS 中找到 LED 标签: " + ", ".join(missing))
+    print("WARN: 未在 U-Boot DTS 中定位到 LED 节点: " + ", ".join(missing), file=sys.stderr)
 
-print("Patched U-Boot DTS:", ", ".join(patched_files))
+if patched_files:
+    print("Patched U-Boot DTS:", ", ".join(patched_files))
+else:
+    print("WARN: U-Boot DTS 未修改任何文件", file=sys.stderr)
 PY
 }
 
@@ -545,10 +560,10 @@ with open(path, "r", encoding="utf-8") as f:
     lines = f.readlines()
 
 
-def find_label_line(candidates):
+def find_anchor_line(tokens):
     for i, line in enumerate(lines):
-        for label in candidates:
-            if f'label = "{label}";' in line:
+        for token in tokens:
+            if token in line:
                 return i
     return -1
 
@@ -571,12 +586,12 @@ def find_block_bounds(label_idx):
     raise RuntimeError("无法定位 LED 节点结束位置")
 
 
-def patch_node(label_candidates, trigger, state):
-    label_idx = find_label_line(label_candidates)
-    if label_idx < 0:
+def patch_node(tokens, trigger, state):
+    anchor_idx = find_anchor_line(tokens)
+    if anchor_idx < 0:
         return False
 
-    start, end = find_block_bounds(label_idx)
+    start, end = find_block_bounds(anchor_idx)
     block = lines[start:end + 1]
 
     indent = None
@@ -604,8 +619,20 @@ def patch_node(label_candidates, trigger, state):
     return True
 
 
-red_ok = patch_node(["orangepi:red:power", "red:power"], "none", "off")
-green_ok = patch_node(["orangepi:green:status", "green:status"], "heartbeat", None)
+red_ok = patch_node([
+    'label = "orangepi:red:power"',
+    'label = "red:power"',
+    "LED_FUNCTION_POWER",
+    'function = "power"',
+    "LED_COLOR_ID_RED",
+], "none", "off")
+green_ok = patch_node([
+    'label = "orangepi:green:status"',
+    'label = "green:status"',
+    "LED_FUNCTION_STATUS",
+    'function = "status"',
+    "LED_COLOR_ID_GREEN",
+], "heartbeat", None)
 
 if not red_ok or not green_ok:
     missing = []
@@ -613,7 +640,7 @@ if not red_ok or not green_ok:
         missing.append("red:power")
     if not green_ok:
         missing.append("green:status")
-    raise SystemExit("未在 DTS 中找到 LED 标签: " + ", ".join(missing))
+    print("WARN: 未在 DTS 中定位到 LED 节点: " + ", ".join(missing), file=sys.stderr)
 
 with open(path, "w", encoding="utf-8") as f:
     f.writelines(lines)
