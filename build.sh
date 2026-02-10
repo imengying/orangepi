@@ -304,12 +304,6 @@ init_workdir() {
   log "工作目录: ${WORKDIR_CREATED}"
 }
 
-read_root_password() {
-  if [[ -z "${ROOT_PASS}" ]]; then
-    ROOT_PASS="orangepi"
-  fi
-}
-
 clone_repo() {
   local repo="$1"
   local ref="$2"
@@ -665,7 +659,14 @@ log "开始扩容 /dev/mmcblk0p2"
 # 使用 growpart 扩展分区（更可靠）
 if command -v growpart >/dev/null 2>&1; then
   log "使用 growpart 扩展分区"
-  growpart /dev/mmcblk0 2 || log "growpart 失败，尝试其他方法"
+  if ! growpart /dev/mmcblk0 2; then
+    log "growpart 失败，回退到 sfdisk/parted"
+    if command -v sfdisk >/dev/null 2>&1; then
+      echo ", +" | sfdisk --no-reread -N 2 /dev/mmcblk0 || log "sfdisk 失败"
+    else
+      parted -s /dev/mmcblk0 resizepart 2 100% || log "parted 失败"
+    fi
+  fi
 elif command -v sfdisk >/dev/null 2>&1; then
   log "使用 sfdisk 扩展分区"
   echo ", +" | sfdisk --no-reread -N 2 /dev/mmcblk0 || log "sfdisk 失败"
@@ -817,15 +818,6 @@ COMPRESS=zstd
 FSTYPE=btrfs
 EOF2
 
-  # 禁用 btrfs fsck（btrfs 不需要传统的 fsck）
-  mkdir -p "${MNT_ROOT}/etc/initramfs-tools/hooks"
-  cat <<'EOF2' > "${MNT_ROOT}/etc/initramfs-tools/hooks/ignore-btrfs-fsck"
-#!/bin/sh
-# 禁用 btrfs 的 fsck 检查（btrfs 使用自己的检查机制）
-exit 0
-EOF2
-  chmod +x "${MNT_ROOT}/etc/initramfs-tools/hooks/ignore-btrfs-fsck"
-
   mkdir -p "${MNT_ROOT}/etc/ssh/sshd_config.d"
   cat <<'EOF2' > "${MNT_ROOT}/etc/ssh/sshd_config.d/99-root-login.conf"
 PermitRootLogin yes
@@ -971,7 +963,6 @@ EOF2
   chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /tmp/* /var/tmp/*"
   chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/info/*"
   chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /usr/share/locale/* /usr/share/i18n/locales/*"
-  chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /var/cache/apt/archives/*.deb"
   chroot "${MNT_ROOT}" /bin/bash -c "find /var/log -type f -exec truncate -s 0 {} \;"
   chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /usr/share/pixmaps/* /usr/share/icons/*"
   chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /usr/share/sounds/*"
@@ -1107,7 +1098,6 @@ main() {
   check_deps
   ensure_loop_support
   init_workdir
-  read_root_password
   fetch_sources
   build_atf
   build_uboot
