@@ -1,122 +1,131 @@
-# Orange Pi Zero 2 Debian 13 Btrfs 镜像构建脚本
+# 香橙派 Zero 2 (Orange Pi Zero 2) Debian 13 系统镜像构建脚本
 
-本仓库用于在 x86_64 Debian/Ubuntu 环境中，构建 Orange Pi Zero 2 (Allwinner H616) 的 Debian 13 (trixie) arm64 启动镜像。
+本仓库专为 **香橙派 Zero 2 (Orange Pi Zero 2 / Allwinner H616)** 设计，提供了一套基于 **GitHub Actions** 的自动化构建流程，用于生成采用 **Btrfs 文件系统** 的 **Debian 13 (Trixie)** Arm64 启动镜像。
 
-## 快速开始
+## ✨ 项目特性
+
+* **自动化构建**：利用 GitHub Actions 实现全自动构建，流程透明可追溯。
+* **纯净系统**：基于 `debootstrap` 构建的原生 Debian 13 (`trixie`) rootfs，无多余预装。
+* **最新内核**：自动编译集成 **Mainline Linux 6.12 LTS** 内核（自动跟踪最新补丁）。
+* **Btrfs 根分区**：默认使用 Btrfs 文件系统，支持透明压缩 (ZSTD) 和快照功能。
+* **开箱即用**：
+    * 首次启动自动扩容根分区。
+    * 集成 `zram` 内存压缩 (lz4)，优化小内存设备性能。
+    * 预配置 LED 心跳灯与 NetworkManager 网络管理。
+
+## 🚀 快速开始 (GitHub Actions)
+
+推荐使用 GitHub Actions 进行构建：
+
+1.  **Fork 本仓库** 到你的 GitHub 账号。
+2.  进入你的仓库页面，点击顶部的 **Actions** 选项卡。
+3.  在左侧选择 **Build Image** 工作流（如果未启用，点击绿色按钮启用）。
+4.  点击右侧的 **Run workflow** 按钮。
+5.  （可选）输入自定义参数（如 tag 或分支），点击绿色 **Run workflow** 按钮开始构建。
+6.  等待构建完成，在 Summary 页面下载生成的 Artifacts (`.img.xz`)。
+
+## 💻 本地构建 (可选)
+
+如果你拥有 Linux (x86_64) 环境（如 Debian/Ubuntu），也可以手动运行脚本进行测试：
 
 ```bash
+# 克隆仓库
+git clone [https://github.com/imengying/orangepi.git](https://github.com/imengying/orangepi.git)
+cd orangepi
+
+# 安装必要依赖 (仅供参考，具体视环境而定)
+sudo apt update && sudo apt install -y debootstrap qemu-user-static binfmt-support build-essential git flex bison libssl-dev bc kmod cpio
+
+# 开始构建
 sudo ./build.sh
+
 ```
 
-在线一键执行（root）：
+## ⚙️ 构建参数说明
+
+脚本支持通过环境变量或参数进行自定义：
+
+| 参数 | 说明 | 默认值 |
+| --- | --- | --- |
+| `--image-size` | 镜像文件大小 | `3G` |
+| `--suite` | Debian 发行版代号 | `trixie` |
+| `--arch` | 目标架构 | `arm64` |
+| `--hostname` | 系统主机名 | `orangepi` |
+| `--mirror` | Apt 镜像源地址 | `http://mirrors.ustc.edu.cn/debian` |
+| `--compress` | 压缩输出 (`xz` 或 `none`) | `xz` |
+| `--kernel-ref` | Linux 内核分支/标签 | `6.12` |
+| `--root-pass` | Root 用户密码 | `orangepi` |
+
+## 📝 镜像默认配置
+
+### 账号与系统
+
+* **用户**: `root`
+* **密码**: `orangepi`
+* **时区**: `Asia/Shanghai`
+* **分区**: `/boot` (FAT32, 128MB), `/` (Btrfs, 剩余空间)
+
+### 网络连接
+
+默认通过 `end0` (有线网卡) 使用 DHCP 获取 IP。
+
+**静态 IP 配置示例：**
 
 ```bash
-sudo bash -c 'bash <(curl -fsSL "https://raw.githubusercontent.com/imengying/orangepi/refs/heads/main/build.sh")'
-```
-
-## 默认行为
-
-- 使用 `debootstrap` 构建 Debian 13 (`trixie`) arm64 rootfs。
-- 全自编译 ATF、U-Boot、Linux 内核。
-- 内核默认跟踪 `6.12` 系列并自动解析最新 `v6.12.x` 补丁。
-- 分区布局：`/boot` 为 FAT32（约 128MiB），`/` 为 btrfs（其余空间）。
-- 首次启动自动扩容 `mmcblk0p2` 并扩展 btrfs。
-- 网络使用 NetworkManager，默认仅有线网卡 `end0`。
-- 默认不编译无线驱动，并移除 WiFi/蓝牙固件。
-- LED 默认：绿灯 `heartbeat`，红灯关闭。
-- zram 默认：`PERCENT=40`、`ALGO=lz4`。
-
-## 常用参数
-
-- `--image-size SIZE`：镜像大小，默认 `3G`
-- `--suite SUITE`：Debian 发行版，默认 `trixie`
-- `--arch ARCH`：目标架构，默认 `arm64`（当前仅支持 `arm64`）
-- `--hostname HOSTNAME`：主机名，默认 `orangepi`
-- `--mirror MIRROR`：Debian 镜像源，默认 `http://mirrors.ustc.edu.cn/debian`
-- `--output PATH`：输出镜像路径，默认 `./orangepi-zero2-debian13-trixie-btrfs.img`
-- `--compress xz|none`：是否压缩，默认 `xz`
-- `--workdir DIR`：工作目录，默认 `/tmp/opi-build-XXXX`
-- `--jobs N`：并行编译线程数，默认 `nproc`
-- `--kernel-repo URL`：内核仓库，默认 `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git`
-- `--kernel-ref REF`：内核分支/标签，默认 `6.12`（自动解析到最新 `v6.12.x`）
-- `--kernel-defconfig NAME`：内核配置目标，默认 `defconfig`
-- `--uboot-repo URL`：U-Boot 仓库，默认 `https://github.com/u-boot/u-boot.git`
-- `--uboot-ref REF`：U-Boot 版本，默认 `v2025.01`
-- `--atf-repo URL`：ATF 仓库，默认 `https://github.com/ARM-software/arm-trusted-firmware.git`
-- `--atf-ref REF`：ATF 版本，默认 `v2.12.0`
-- `--root-pass PASSWORD`：root 密码，默认 `orangepi`
-
-## 输出文件
-
-- `--compress xz`（默认）：输出 `*.img.xz`
-- `--compress none`：输出 `*.img`
-
-## 系统默认账号
-
-- 用户：`root`
-- 密码：`orangepi`
-- 时区：`Asia/Shanghai`
-
-修改时区示例：
-
-```bash
-# 查看可用时区
-timedatectl list-timezones
-
-# 设置时区（示例）
-timedatectl set-timezone UTC
-```
-
-## 网络配置
-
-系统默认通过 `end0` 使用 DHCP。
-
-手动配置静态 IP：
-
-```bash
-nmcli connection modify Wired-end0 ipv4.method manual ipv4.addresses 192.168.1.100/24 ipv4.gateway 192.168.1.1 ipv4.dns 8.8.8.8
+nmcli connection modify Wired-end0 ipv4.method manual \
+    ipv4.addresses 192.168.1.100/24 \
+    ipv4.gateway 192.168.1.1 \
+    ipv4.dns 8.8.8.8
 nmcli connection up Wired-end0
+
 ```
 
-## LED 控制
+### LED 状态灯
 
-```bash
-# 查看所有 LED
-led-control show
+* **绿灯**: 心跳模式 (系统正常运行)
+* **红灯**: 默认关闭
 
-# 绿灯心跳 + 红灯关闭（默认）
-led-control heartbeat
+控制指令：`led-control {heartbeat|on|off}`
 
-# 全灯心跳（可选）
-led-control all-heartbeat
+### ZRAM 内存优化
 
-# 全部关闭
-led-control off
+默认启用 ZRAM，使用 `lz4` 算法压缩，占用内存上限为 40%。配置文件位于 `/etc/default/zramswap`。
 
-# 常亮
-led-control on
+## ⚠️ 关于无线与蓝牙
+
+**本镜像默认未集成 WiFi 和蓝牙驱动。**
+
+由于香橙派 Zero 2 的无线/蓝牙芯片驱动依赖闭源固件 (Closed-source Firmware) 且通常是非主线驱动 (Out-of-tree)，难以在纯净的主线内核 (Mainline Kernel) 构建流程中完美集成。为了确保内核的稳定性与系统的纯净性，本镜像移除了相关固件，推荐使用有线网络连接。
+
+## 📜 License
+
+本项目基于 [MIT License](https://www.google.com/search?q=LICENSE) 开源。
+
+```text
+MIT License
+
+Copyright (c) 2024 Mengying
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ```
 
-## zram 配置
-
-当前默认配置文件：`/etc/default/zramswap`
-
-```bash
-PERCENT=40
-ALGO=lz4
-PRIORITY=100
 ```
 
-查看状态：
-
-```bash
-zramctl
-swapon --show
-free -h
-```
-
-重启服务：
-
-```bash
-systemctl restart zramswap
 ```
