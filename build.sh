@@ -373,7 +373,6 @@ build_uboot() {
   log "编译 U-Boot"
   make -C "${UBOOT_SRC_DIR}" distclean >/dev/null 2>&1 || true
   make -C "${UBOOT_SRC_DIR}" CROSS_COMPILE=aarch64-linux-gnu- orangepi_zero2_defconfig
-  set_uboot_dtb_led_defaults
   if [[ -x "${UBOOT_SRC_DIR}/scripts/config" ]]; then
     "${UBOOT_SRC_DIR}/scripts/config" --file "${UBOOT_SRC_DIR}/.config" \
       --disable TOOLS_MKEFICAPSULE \
@@ -396,225 +395,24 @@ build_uboot() {
   cp "${uboot_bin}" "${ASSETS_DIR}/uboot.bin"
 }
 
-set_uboot_dtb_led_defaults() {
-  local dts_root="${UBOOT_SRC_DIR}/arch/arm/dts"
-  local uboot_cfg="${UBOOT_SRC_DIR}/.config"
-  if [[ ! -d "${dts_root}" ]]; then
-    echo "未找到 U-Boot DTS 目录: ${dts_root}"
-    exit 1
-  fi
-
-  log "修改 U-Boot 设备树 LED 默认状态（红灯关闭，绿灯点亮）"
-  python3 - "${dts_root}" "${uboot_cfg}" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-dts_root = Path(sys.argv[1])
-uboot_cfg = Path(sys.argv[2])
-patterns = []
-allowed_markers = ("orangepi-zero", "orangepi_zero")
-
-
-def is_target_name(name):
-    return "sun50i-h616" in name and any(marker in name for marker in allowed_markers)
-
-if uboot_cfg.is_file():
-    cfg_text = uboot_cfg.read_text(encoding="utf-8", errors="ignore")
-    m = re.search(r'^CONFIG_DEFAULT_DEVICE_TREE="([^"]+)"', cfg_text, re.M)
-    if m:
-        dt = m.group(1)
-        if is_target_name(dt):
-            patterns.extend([
-                f"{dt}.dts",
-                f"{dt}.dtsi",
-                f"{dt}*.dtsi",
-                f"{dt}*.dts",
-            ])
-        else:
-            print(f"WARN: 忽略非目标设备树 CONFIG_DEFAULT_DEVICE_TREE={dt}", file=sys.stderr)
-
-patterns = [
-    *patterns,
-    "sun50i-h616-orangepi-zero2*.dts",
-    "sun50i-h616-orangepi-zero2*.dtsi",
-    "sun50i-h616-orangepi-zero*.dts",
-    "sun50i-h616-orangepi-zero*.dtsi",
-    "sun50i-h616-orangepi_zero2*.dts",
-    "sun50i-h616-orangepi_zero2*.dtsi",
-    "sun50i-h616-orangepi_zero*.dts",
-    "sun50i-h616-orangepi_zero*.dtsi",
-]
-files = []
-seen = set()
-for pattern in patterns:
-    for fp in sorted(dts_root.glob(pattern)):
-        if not is_target_name(fp.name):
-            continue
-        if fp not in seen:
-            files.append(fp)
-            seen.add(fp)
-
-if not files:
-    print("WARN: 未在 U-Boot DTS 目录找到 orangepi-zero2 相关 dts/dtsi，跳过 LED 默认状态修改", file=sys.stderr)
-    raise SystemExit(0)
-
-red_tokens = [
-    'label = "orangepi:red:power"',
-    'label = "red:power"',
-    "LED_FUNCTION_POWER",
-    'function = "power"',
-    "LED_COLOR_ID_RED",
-]
-green_tokens = [
-    'label = "orangepi:green:status"',
-    'label = "green:status"',
-    "LED_FUNCTION_STATUS",
-    'function = "status"',
-    "LED_COLOR_ID_GREEN",
-]
-
-
-def find_anchor_line(lines, tokens):
-    for i, line in enumerate(lines):
-        for token in tokens:
-            if token in line:
-                return i
-    return -1
-
-
-def find_block_bounds(lines, label_idx):
-    start = -1
-    for i in range(label_idx, -1, -1):
-        if "{" in lines[i]:
-            start = i
-            break
-    if start < 0:
-        raise RuntimeError("无法定位 LED 节点开始位置")
-
-    depth = 0
-    for i in range(start, len(lines)):
-        depth += lines[i].count("{")
-        depth -= lines[i].count("}")
-        if depth == 0:
-            return start, i
-    raise RuntimeError("无法定位 LED 节点结束位置")
-
-
-def patch_node(lines, tokens, trigger, state):
-    anchor_idx = find_anchor_line(lines, tokens)
-    if anchor_idx < 0:
-        return lines, False
-
-    start, end = find_block_bounds(lines, anchor_idx)
-    block = lines[start:end + 1]
-
-    indent = None
-    for line in block:
-        if "label =" in line:
-            indent = re.match(r"^(\s*)", line).group(1)
-            break
-    if indent is None:
-        indent = re.match(r"^(\s*)", block[0]).group(1) + "\t"
-
-    new_block = []
-    for line in block[:-1]:
-        if re.search(r"\blinux,default-trigger\s*=", line):
-            continue
-        if re.search(r"\bdefault-state\s*=", line):
-            continue
-        new_block.append(line)
-
-    new_block.append(f'{indent}linux,default-trigger = "{trigger}";\n')
-    if state:
-        new_block.append(f'{indent}default-state = "{state}";\n')
-    new_block.append(block[-1])
-
-    lines[start:end + 1] = new_block
-    return lines, True
-
-
-red_done = False
-green_done = False
-patched_files = []
-
-for file_path in files:
-    try:
-        text = file_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        continue
-
-    lines = text.splitlines(keepends=True)
-    changed = False
-
-    if not red_done:
-        lines, ok = patch_node(lines, red_tokens, "none", "off")
-        if ok:
-            red_done = True
-            changed = True
-
-    if not green_done:
-        lines, ok = patch_node(lines, green_tokens, "heartbeat", "on")
-        if ok:
-            green_done = True
-            changed = True
-
-    if changed:
-        file_path.write_text("".join(lines), encoding="utf-8")
-        patched_files.append(str(file_path))
-
-    if red_done and green_done:
-        break
-
-if not red_done or not green_done:
-    missing = []
-    if not red_done:
-        missing.append("red:power")
-    if not green_done:
-        missing.append("green:status")
-    print("WARN: 未在 U-Boot DTS 中定位到 LED 节点: " + ", ".join(missing), file=sys.stderr)
-
-if patched_files:
-    print("Patched U-Boot DTS:", ", ".join(patched_files))
-else:
-    print("WARN: U-Boot DTS 未修改任何文件", file=sys.stderr)
-PY
-}
-
 set_dtb_led_defaults() {
-  local dts_root="${KERNEL_SRC_DIR}/arch/arm64/boot/dts/allwinner"
-  if [[ ! -d "${dts_root}" ]]; then
-    echo "未找到 DTS 目录: ${dts_root}"
+  local dts_file="${KERNEL_SRC_DIR}/arch/arm64/boot/dts/allwinner/sun50i-h616-orangepi-zero.dtsi"
+  if [[ ! -f "${dts_file}" ]]; then
+    echo "未找到内核 LED 设备树文件: ${dts_file}"
     exit 1
   fi
 
-  log "修改设备树 LED 默认状态（红灯关闭，绿灯心跳）"
-  python3 - "${dts_root}" <<'PY'
+  log "修改内核设备树 LED 默认状态（红灯关闭，绿灯心跳）"
+  python3 - "${dts_file}" <<'PY'
 import re
 import sys
-from pathlib import Path
 
-root = Path(sys.argv[1])
-patterns = [
-    "sun50i-h616-orangepi-zero2*.dts",
-    "sun50i-h616-orangepi-zero2*.dtsi",
-    "sun50i-h616-orangepi-zero*.dts",
-    "sun50i-h616-orangepi-zero*.dtsi",
-]
-files = []
-seen = set()
-for pattern in patterns:
-    for fp in sorted(root.glob(pattern)):
-        if fp not in seen:
-            files.append(fp)
-            seen.add(fp)
-
-if not files:
-    print(f"WARN: 未在 {root} 找到 orangepi-zero2 相关 dts/dtsi，跳过 LED 默认状态修改", file=sys.stderr)
-    raise SystemExit(0)
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    lines = f.readlines()
 
 
-def find_anchor_line(lines, tokens):
+def find_anchor(tokens):
     for i, line in enumerate(lines):
         for token in tokens:
             if token in line:
@@ -622,9 +420,9 @@ def find_anchor_line(lines, tokens):
     return -1
 
 
-def find_block_bounds(lines, label_idx):
+def find_block_bounds(anchor_idx):
     start = -1
-    for i in range(label_idx, -1, -1):
+    for i in range(anchor_idx, -1, -1):
         if "{" in lines[i]:
             start = i
             break
@@ -640,17 +438,17 @@ def find_block_bounds(lines, label_idx):
     raise RuntimeError("无法定位 LED 节点结束位置")
 
 
-def patch_node(lines, tokens, trigger, state):
-    anchor_idx = find_anchor_line(lines, tokens)
+def patch_node(tokens, trigger, state):
+    anchor_idx = find_anchor(tokens)
     if anchor_idx < 0:
-        return lines, False
+        return False
 
-    start, end = find_block_bounds(lines, anchor_idx)
+    start, end = find_block_bounds(anchor_idx)
     block = lines[start:end + 1]
 
     indent = None
     for line in block:
-        if "label =" in line:
+        if "label =" in line or "function =" in line:
             indent = re.match(r"^(\s*)", line).group(1)
             break
     if indent is None:
@@ -665,60 +463,28 @@ def patch_node(lines, tokens, trigger, state):
         new_block.append(line)
 
     new_block.append(f'{indent}linux,default-trigger = "{trigger}";\n')
-    if state:
+    if state is not None:
         new_block.append(f'{indent}default-state = "{state}";\n')
     new_block.append(block[-1])
 
     lines[start:end + 1] = new_block
-    return lines, True
+    return True
 
 
-red_tokens = [
+red_ok = patch_node([
     'label = "orangepi:red:power"',
     'label = "red:power"',
     "LED_FUNCTION_POWER",
     'function = "power"',
     "LED_COLOR_ID_RED",
-]
-green_tokens = [
+], "none", "off")
+green_ok = patch_node([
     'label = "orangepi:green:status"',
     'label = "green:status"',
     "LED_FUNCTION_STATUS",
     'function = "status"',
     "LED_COLOR_ID_GREEN",
-]
-
-red_ok = False
-green_ok = False
-patched_files = []
-
-for file_path in files:
-    try:
-        text = file_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        continue
-
-    lines = text.splitlines(keepends=True)
-    changed = False
-
-    if not red_ok:
-        lines, ok = patch_node(lines, red_tokens, "none", "off")
-        if ok:
-            red_ok = True
-            changed = True
-
-    if not green_ok:
-        lines, ok = patch_node(lines, green_tokens, "heartbeat", None)
-        if ok:
-            green_ok = True
-            changed = True
-
-    if changed:
-        file_path.write_text("".join(lines), encoding="utf-8")
-        patched_files.append(str(file_path))
-
-    if red_ok and green_ok:
-        break
+], "heartbeat", None)
 
 if not red_ok or not green_ok:
     missing = []
@@ -726,12 +492,12 @@ if not red_ok or not green_ok:
         missing.append("red:power")
     if not green_ok:
         missing.append("green:status")
-    print("WARN: 未在 DTS 中定位到 LED 节点: " + ", ".join(missing), file=sys.stderr)
+    print("WARN: 未在内核 DTS 中定位到 LED 节点: " + ", ".join(missing), file=sys.stderr)
 
-if patched_files:
-    print("Patched Kernel DTS:", ", ".join(patched_files))
-else:
-    print("WARN: Kernel DTS 未修改任何文件", file=sys.stderr)
+with open(path, "w", encoding="utf-8") as f:
+    f.writelines(lines)
+
+print(f"Patched Kernel DTS: {path}")
 PY
 }
 
