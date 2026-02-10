@@ -13,8 +13,8 @@ COMPRESS="xz"
 WORKDIR=""
 ROOT_PASS="orangepi"
 
-KERNEL_REPO="https://github.com/torvalds/linux.git"
-KERNEL_REF="v6.12.69"
+KERNEL_REPO="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
+KERNEL_REF="6.12"
 KERNEL_DEFCONFIG="defconfig"
 UBOOT_REPO="https://github.com/u-boot/u-boot.git"
 UBOOT_REF="v2025.01"
@@ -234,6 +234,56 @@ validate_args() {
   fi
 }
 
+resolve_kernel_ref() {
+  local ref="${KERNEL_REF}"
+  local major=""
+  local minor=""
+
+  # 支持 --kernel-ref 6.12.69（自动补 v 前缀）
+  if [[ "${ref}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    KERNEL_REF="v${ref}"
+    log "内核版本: ${KERNEL_REF}"
+    return
+  fi
+
+  # 支持 --kernel-ref 6.12 / v6.12（自动解析最新补丁版）
+  if [[ "${ref}" =~ ^v?([0-9]+)\.([0-9]+)$ ]]; then
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+
+    local latest_patch=-1
+    local patch=""
+    local remote_tag=""
+    local latest_tag=""
+
+    log "解析内核系列 v${major}.${minor} 的最新补丁版本"
+    while read -r _ remote_tag; do
+      remote_tag="${remote_tag#refs/tags/}"
+      if [[ "${remote_tag}" =~ ^v${major}\.${minor}\.([0-9]+)$ ]]; then
+        patch="${BASH_REMATCH[1]}"
+        if (( 10#${patch} > latest_patch )); then
+          latest_patch=$((10#${patch}))
+          latest_tag="${remote_tag}"
+        fi
+      fi
+    done < <(git ls-remote --tags --refs "${KERNEL_REPO}" "v${major}.${minor}.*")
+
+    if [[ -z "${latest_tag}" ]]; then
+      echo "无法在 ${KERNEL_REPO} 中找到 v${major}.${minor}.x 标签。"
+      echo "请检查 --kernel-repo 是否为 stable 树，或直接指定 --kernel-ref v${major}.${minor}.Z"
+      exit 1
+    fi
+
+    KERNEL_REF="${latest_tag}"
+    log "内核版本: ${KERNEL_REF}（自动解析）"
+    return
+  fi
+
+  # 其他引用（分支/标签/commit）保持原样
+  KERNEL_REF="${ref}"
+  log "内核版本: ${KERNEL_REF}"
+}
+
 init_workdir() {
   if [[ -n "${WORKDIR}" ]]; then
     WORKDIR_CREATED="${WORKDIR}"
@@ -303,6 +353,7 @@ clone_repo() {
 
 fetch_sources() {
   log "获取源码"
+  resolve_kernel_ref
   clone_repo "${ATF_REPO}" "${ATF_REF}" "${ATF_SRC_DIR}"
   clone_repo "${UBOOT_REPO}" "${UBOOT_REF}" "${UBOOT_SRC_DIR}"
   clone_repo "${KERNEL_REPO}" "${KERNEL_REF}" "${KERNEL_SRC_DIR}"
@@ -353,6 +404,8 @@ build_kernel() {
       --enable BLK_DEV_INITRD \
       --enable BTRFS_FS \
       --enable BTRFS_FS_POSIX_ACL \
+      --module ZSMALLOC \
+      --module ZRAM \
       --enable USB \
       --enable USB_SUPPORT \
       --enable USB_XHCI_HCD \
@@ -389,18 +442,13 @@ build_kernel() {
       --enable MMC \
       --enable MMC_SUNXI \
       --enable STMMAC_ETH \
-      --enable DWMAC_SUN8I
+      --enable DWMAC_SUN8I \
+      --set-str LOCALVERSION "" \
+      --disable LOCALVERSION_AUTO
   fi
 
   make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-  
-  # 设置 EXTRAVERSION 以显示完整版本号
-  log "设置内核版本号"
-  if [[ "${KERNEL_REF}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-    PATCH_VERSION="${BASH_REMATCH[3]}"
-    sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = .${PATCH_VERSION}/" "${KERNEL_SRC_DIR}/Makefile"
-  fi
-  
+
   make -C "${KERNEL_SRC_DIR}" -j"${JOBS}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image modules dtbs
 
   KERNEL_RELEASE=$(make -s -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kernelrelease)
@@ -603,8 +651,8 @@ EOF2
   # 配置 zram 参数
   cat <<'EOF2' > "${MNT_ROOT}/etc/default/zramswap"
 # zram 配置
-# 分配内存的百分比（50% = 0.5）
-ALLOCATION=0.5
+# 使用总内存百分比
+PERCENT=50
 # 压缩算法（lz4 速度快，zstd 压缩率高）
 ALGO=lz4
 # 优先级
@@ -613,30 +661,45 @@ EOF2
   
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable zramswap.service"
   
-  # 配置 LED（关闭电源指示灯或设置为心跳模式）
+  # 配置 LED（红灯关闭，绿灯心跳）
   log "配置 LED 行为"
   cat <<'EOF2' > "${MNT_ROOT}/etc/rc.local"
 #!/bin/bash
-# 设置 LED 为心跳模式（可选：改为 none 关闭）
-# 查找并配置所有可用的 LED
-for led in /sys/class/leds/*/trigger; do
-  led_name=$(dirname "$led")
-  led_base=$(basename "$led_name")
-  
-  # 如果是红色电源灯，设置为心跳模式
-  if [[ "$led_base" == *"red"* ]] || [[ "$led_base" == *"power"* ]]; then
-    echo heartbeat > "$led" 2>/dev/null || true
+# 红灯关闭，绿灯心跳
+
+set_trigger() {
+  local led_dir="$1"
+  local mode="$2"
+  [[ -d "${led_dir}" ]] || return 0
+  echo "${mode}" > "${led_dir}/trigger" 2>/dev/null || true
+}
+
+set_brightness() {
+  local led_dir="$1"
+  local value="$2"
+  [[ -d "${led_dir}" ]] || return 0
+  echo "${value}" > "${led_dir}/brightness" 2>/dev/null || true
+}
+
+for led_dir in /sys/class/leds/*; do
+  [[ -d "${led_dir}" ]] || continue
+  led_base=$(basename "${led_dir}")
+
+  if [[ "${led_base}" == *"red"* ]] || [[ "${led_base}" == *"power"* ]]; then
+    set_trigger "${led_dir}" none
+    set_brightness "${led_dir}" 0
+    continue
   fi
-  
-  # 如果是绿色状态灯，设置为心跳模式
-  if [[ "$led_base" == *"green"* ]] || [[ "$led_base" == *"status"* ]]; then
-    echo heartbeat > "$led" 2>/dev/null || true
+
+  if [[ "${led_base}" == *"green"* ]] || [[ "${led_base}" == *"status"* ]]; then
+    set_trigger "${led_dir}" heartbeat
   fi
 done
 
 # 如果上面的通用方法不工作，尝试具体路径
-echo heartbeat > /sys/class/leds/orangepi:red:power/trigger 2>/dev/null || true
-echo heartbeat > /sys/class/leds/orangepi:green:status/trigger 2>/dev/null || true
+set_trigger /sys/class/leds/orangepi:red:power none
+set_brightness /sys/class/leds/orangepi:red:power 0
+set_trigger /sys/class/leds/orangepi:green:status heartbeat
 
 exit 0
 EOF2
@@ -646,6 +709,42 @@ EOF2
   cat <<'EOF2' > "${MNT_ROOT}/usr/local/bin/led-control"
 #!/bin/bash
 # LED 控制脚本
+
+set_trigger() {
+  local led_dir="$1"
+  local mode="$2"
+  [ -d "$led_dir" ] || return 0
+  echo "$mode" > "$led_dir/trigger" 2>/dev/null || true
+}
+
+set_brightness() {
+  local led_dir="$1"
+  local value="$2"
+  [ -d "$led_dir" ] || return 0
+  echo "$value" > "$led_dir/brightness" 2>/dev/null || true
+}
+
+green_heartbeat_red_off() {
+  for led_dir in /sys/class/leds/*; do
+    [ -d "$led_dir" ] || continue
+    led_name=$(basename "$led_dir")
+
+    if [[ "$led_name" == *"red"* ]] || [[ "$led_name" == *"power"* ]]; then
+      set_trigger "$led_dir" none
+      set_brightness "$led_dir" 0
+      continue
+    fi
+
+    if [[ "$led_name" == *"green"* ]] || [[ "$led_name" == *"status"* ]]; then
+      set_trigger "$led_dir" heartbeat
+    fi
+  done
+
+  # 回退到常见固定路径
+  set_trigger /sys/class/leds/orangepi:red:power none
+  set_brightness /sys/class/leds/orangepi:red:power 0
+  set_trigger /sys/class/leds/orangepi:green:status heartbeat
+}
 
 show_leds() {
   echo "可用的 LED："
@@ -662,7 +761,11 @@ set_mode() {
   local mode=$1
   case $mode in
     heartbeat)
-      echo "设置为心跳模式"
+      echo "设置为绿灯心跳，红灯关闭"
+      green_heartbeat_red_off
+      ;;
+    all-heartbeat)
+      echo "设置为全部心跳模式"
       for led in /sys/class/leds/*/trigger; do
         echo heartbeat > "$led" 2>/dev/null || true
       done
@@ -682,7 +785,7 @@ set_mode() {
       done
       ;;
     *)
-      echo "用法: led-control [show|heartbeat|off|on]"
+      echo "用法: led-control [show|heartbeat|all-heartbeat|off|on]"
       exit 1
       ;;
   esac

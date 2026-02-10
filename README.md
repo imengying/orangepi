@@ -12,7 +12,7 @@
 - 首次启动自动扩容 `/dev/mmcblk0p2`，并扩展 btrfs 文件系统（使用 growpart 工具）。
 - **zram 压缩内存交换**：使用 50% 内存作为压缩 swap，不占用 SD 卡空间，延长 SD 卡寿命。
 - **镜像优化**：使用 `--no-install-recommends`、清理缓存文档、精简内核模块、极限压缩，大幅减小镜像体积。
-- **LED 控制**：电源指示灯设置为心跳模式（可自定义）。
+- **LED 控制**：默认绿灯心跳、红灯关闭（可自定义）。
 - **精简配置**：移除 WiFi/蓝牙固件（有线网络可用，减小镜像体积），禁用不必要的系统服务。
 - **内核版本**：显示完整版本号（如 6.12.69）。
 
@@ -56,7 +56,7 @@ sudo bash -c 'bash <(curl -fsSL "https://raw.githubusercontent.com/imengying/ora
 
 常用参数：
 
-- `--image-size SIZE`：镜像大小，默认 `4G`
+- `--image-size SIZE`：镜像大小，默认 `3G`
 - `--suite SUITE`：Debian 发行版代号，默认 `trixie`
 - `--arch ARCH`：目标架构，默认 `arm64`（当前仅支持 `arm64`）
 - `--hostname HOSTNAME`：主机名，默认 `orangepi`
@@ -65,8 +65,8 @@ sudo bash -c 'bash <(curl -fsSL "https://raw.githubusercontent.com/imengying/ora
 - `--compress xz|none`：是否压缩，默认 `xz`
 - `--workdir DIR`：工作目录，默认 `/tmp/opi-build-XXXX`
 - `--jobs N`：并行编译线程数，默认 `nproc`
-- `--kernel-repo URL`：Linux 内核仓库，默认 `https://github.com/torvalds/linux.git`
-- `--kernel-ref REF`：Linux 内核分支/标签，默认 `v6.12.69`
+- `--kernel-repo URL`：Linux 内核仓库，默认 `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git`
+- `--kernel-ref REF`：Linux 内核分支/标签，默认 `6.12`（会自动解析为 `v6.12.x` 最新补丁）
 - `--kernel-defconfig NAME`：内核配置目标，默认 `defconfig`
 - `--uboot-repo URL`：U-Boot 仓库，默认 `https://github.com/u-boot/u-boot.git`
 - `--uboot-ref REF`：U-Boot 分支/标签，默认 `v2025.01`
@@ -97,14 +97,17 @@ sudo dd if=orangepi-zero2-debian13-trixie-btrfs.img of=/dev/sdX bs=4M conv=fsync
 
 ## LED 控制
 
-系统启动后会自动将 LED 设置为心跳模式。你可以使用内置的 `led-control` 命令来控制 LED：
+系统启动后会自动将 LED 设置为“绿灯心跳、红灯关闭”。你可以使用内置的 `led-control` 命令来控制 LED：
 
 ```bash
 # 查看所有可用的 LED
 led-control show
 
-# 设置为心跳模式（默认）
+# 设置为绿灯心跳（默认，红灯关闭）
 led-control heartbeat
+
+# 设置为全灯心跳（可选）
+led-control all-heartbeat
 
 # 关闭所有 LED
 led-control off
@@ -139,8 +142,8 @@ free -h
 
 调整 zram 配置（编辑 `/etc/default/zramswap`）：
 ```bash
-# 分配内存百分比（0.5 = 50%）
-ALLOCATION=0.5
+# 分配内存百分比
+PERCENT=50
 
 # 压缩算法
 # lz4 - 速度快，压缩率中等（推荐）
