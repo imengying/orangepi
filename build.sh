@@ -410,8 +410,19 @@ import sys
 from pathlib import Path
 
 dts_root = Path(sys.argv[1])
-files = list(dts_root.glob("sun50i-h616-orangepi-zero2*.dts"))
-files += list(dts_root.glob("sun50i-h616-orangepi-zero2*.dtsi"))
+patterns = [
+    "sun50i-h616-orangepi-zero2*.dts",
+    "sun50i-h616-orangepi-zero2*.dtsi",
+    "sun50i-h616-orangepi-zero*.dts",
+    "sun50i-h616-orangepi-zero*.dtsi",
+]
+files = []
+seen = set()
+for pattern in patterns:
+    for fp in sorted(dts_root.glob(pattern)):
+        if fp not in seen:
+            files.append(fp)
+            seen.add(fp)
 if not files:
     files = sorted(dts_root.glob("*.dts")) + sorted(dts_root.glob("*.dtsi"))
 
@@ -541,26 +552,40 @@ PY
 }
 
 set_dtb_led_defaults() {
-  local dts_file="${KERNEL_SRC_DIR}/arch/arm64/boot/dts/allwinner/sun50i-h616-orangepi-zero2.dts"
-  if [[ ! -f "${dts_file}" ]]; then
-    dts_file=$(find "${KERNEL_SRC_DIR}/arch/arm64/boot/dts" -type f -name "sun50i-h616-orangepi-zero2.dts" | head -n1 || true)
-  fi
-  if [[ -z "${dts_file}" || ! -f "${dts_file}" ]]; then
-    echo "未找到 DTS: sun50i-h616-orangepi-zero2.dts"
+  local dts_root="${KERNEL_SRC_DIR}/arch/arm64/boot/dts/allwinner"
+  if [[ ! -d "${dts_root}" ]]; then
+    echo "未找到 DTS 目录: ${dts_root}"
     exit 1
   fi
 
   log "修改设备树 LED 默认状态（红灯关闭，绿灯心跳）"
-  python3 - "${dts_file}" <<'PY'
+  python3 - "${dts_root}" <<'PY'
 import re
 import sys
+from pathlib import Path
 
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    lines = f.readlines()
+root = Path(sys.argv[1])
+patterns = [
+    "sun50i-h616-orangepi-zero2*.dts",
+    "sun50i-h616-orangepi-zero2*.dtsi",
+    "sun50i-h616-orangepi-zero*.dts",
+    "sun50i-h616-orangepi-zero*.dtsi",
+]
+files = []
+seen = set()
+for pattern in patterns:
+    for fp in sorted(root.glob(pattern)):
+        if fp not in seen:
+            files.append(fp)
+            seen.add(fp)
+if not files:
+    files = sorted(root.glob("*.dts")) + sorted(root.glob("*.dtsi"))
+
+if not files:
+    raise SystemExit(f"未在 {root} 找到可处理的 dts/dtsi 文件")
 
 
-def find_anchor_line(tokens):
+def find_anchor_line(lines, tokens):
     for i, line in enumerate(lines):
         for token in tokens:
             if token in line:
@@ -568,7 +593,7 @@ def find_anchor_line(tokens):
     return -1
 
 
-def find_block_bounds(label_idx):
+def find_block_bounds(lines, label_idx):
     start = -1
     for i in range(label_idx, -1, -1):
         if "{" in lines[i]:
@@ -586,12 +611,12 @@ def find_block_bounds(label_idx):
     raise RuntimeError("无法定位 LED 节点结束位置")
 
 
-def patch_node(tokens, trigger, state):
-    anchor_idx = find_anchor_line(tokens)
+def patch_node(lines, tokens, trigger, state):
+    anchor_idx = find_anchor_line(lines, tokens)
     if anchor_idx < 0:
-        return False
+        return lines, False
 
-    start, end = find_block_bounds(anchor_idx)
+    start, end = find_block_bounds(lines, anchor_idx)
     block = lines[start:end + 1]
 
     indent = None
@@ -616,23 +641,55 @@ def patch_node(tokens, trigger, state):
     new_block.append(block[-1])
 
     lines[start:end + 1] = new_block
-    return True
+    return lines, True
 
 
-red_ok = patch_node([
+red_tokens = [
     'label = "orangepi:red:power"',
     'label = "red:power"',
     "LED_FUNCTION_POWER",
     'function = "power"',
     "LED_COLOR_ID_RED",
-], "none", "off")
-green_ok = patch_node([
+]
+green_tokens = [
     'label = "orangepi:green:status"',
     'label = "green:status"',
     "LED_FUNCTION_STATUS",
     'function = "status"',
     "LED_COLOR_ID_GREEN",
-], "heartbeat", None)
+]
+
+red_ok = False
+green_ok = False
+patched_files = []
+
+for file_path in files:
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
+
+    lines = text.splitlines(keepends=True)
+    changed = False
+
+    if not red_ok:
+        lines, ok = patch_node(lines, red_tokens, "none", "off")
+        if ok:
+            red_ok = True
+            changed = True
+
+    if not green_ok:
+        lines, ok = patch_node(lines, green_tokens, "heartbeat", None)
+        if ok:
+            green_ok = True
+            changed = True
+
+    if changed:
+        file_path.write_text("".join(lines), encoding="utf-8")
+        patched_files.append(str(file_path))
+
+    if red_ok and green_ok:
+        break
 
 if not red_ok or not green_ok:
     missing = []
@@ -642,8 +699,10 @@ if not red_ok or not green_ok:
         missing.append("green:status")
     print("WARN: 未在 DTS 中定位到 LED 节点: " + ", ".join(missing), file=sys.stderr)
 
-with open(path, "w", encoding="utf-8") as f:
-    f.writelines(lines)
+if patched_files:
+    print("Patched Kernel DTS:", ", ".join(patched_files))
+else:
+    print("WARN: Kernel DTS 未修改任何文件", file=sys.stderr)
 PY
 }
 
