@@ -398,19 +398,40 @@ build_uboot() {
 
 set_uboot_dtb_led_defaults() {
   local dts_root="${UBOOT_SRC_DIR}/arch/arm/dts"
+  local uboot_cfg="${UBOOT_SRC_DIR}/.config"
   if [[ ! -d "${dts_root}" ]]; then
     echo "未找到 U-Boot DTS 目录: ${dts_root}"
     exit 1
   fi
 
   log "修改 U-Boot 设备树 LED 默认状态（红灯关闭，绿灯点亮）"
-  python3 - "${dts_root}" <<'PY'
+  python3 - "${dts_root}" "${uboot_cfg}" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 dts_root = Path(sys.argv[1])
+uboot_cfg = Path(sys.argv[2])
+patterns = []
+allowed_prefix = "sun50i-h616-orangepi-zero"
+
+if uboot_cfg.is_file():
+    cfg_text = uboot_cfg.read_text(encoding="utf-8", errors="ignore")
+    m = re.search(r'^CONFIG_DEFAULT_DEVICE_TREE="([^"]+)"', cfg_text, re.M)
+    if m:
+        dt = m.group(1)
+        if allowed_prefix in dt:
+            patterns.extend([
+                f"{dt}.dts",
+                f"{dt}.dtsi",
+                f"{dt}*.dtsi",
+                f"{dt}*.dts",
+            ])
+        else:
+            print(f"WARN: 忽略非目标设备树 CONFIG_DEFAULT_DEVICE_TREE={dt}", file=sys.stderr)
+
 patterns = [
+    *patterns,
     "sun50i-h616-orangepi-zero2*.dts",
     "sun50i-h616-orangepi-zero2*.dtsi",
     "sun50i-h616-orangepi-zero*.dts",
@@ -420,14 +441,15 @@ files = []
 seen = set()
 for pattern in patterns:
     for fp in sorted(dts_root.glob(pattern)):
+        if allowed_prefix not in fp.name:
+            continue
         if fp not in seen:
             files.append(fp)
             seen.add(fp)
-if not files:
-    files = sorted(dts_root.glob("*.dts")) + sorted(dts_root.glob("*.dtsi"))
 
 if not files:
-    raise SystemExit("U-Boot DTS 目录中没有可处理的 dts/dtsi 文件")
+    print("WARN: 未在 U-Boot DTS 目录找到 orangepi-zero2 相关 dts/dtsi，跳过 LED 默认状态修改", file=sys.stderr)
+    raise SystemExit(0)
 
 red_tokens = [
     'label = "orangepi:red:power"',
@@ -578,11 +600,10 @@ for pattern in patterns:
         if fp not in seen:
             files.append(fp)
             seen.add(fp)
-if not files:
-    files = sorted(root.glob("*.dts")) + sorted(root.glob("*.dtsi"))
 
 if not files:
-    raise SystemExit(f"未在 {root} 找到可处理的 dts/dtsi 文件")
+    print(f"WARN: 未在 {root} 找到 orangepi-zero2 相关 dts/dtsi，跳过 LED 默认状态修改", file=sys.stderr)
+    raise SystemExit(0)
 
 
 def find_anchor_line(lines, tokens):
