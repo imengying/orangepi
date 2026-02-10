@@ -402,6 +402,13 @@ build_kernel() {
     log "启用额外的内核功能"
     "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_SRC_DIR}/.config" \
       --enable BLK_DEV_INITRD \
+      --enable RD_GZIP \
+      --enable RD_BZIP2 \
+      --enable RD_LZMA \
+      --enable RD_XZ \
+      --enable RD_LZO \
+      --enable RD_LZ4 \
+      --enable RD_ZSTD \
       --enable BTRFS_FS \
       --enable BTRFS_FS_POSIX_ACL \
       --module ZSMALLOC \
@@ -610,8 +617,36 @@ deb ${MIRROR} ${SUITE}-updates main contrib non-free non-free-firmware
 EOF2
 
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
-  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils"
+  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils zstd"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
+  
+  # 确保 NetworkManager 管理所有网络接口
+  cat <<'EOF2' > "${MNT_ROOT}/etc/NetworkManager/conf.d/10-globally-managed-devices.conf"
+[keyfile]
+unmanaged-devices=none
+EOF2
+
+  # 配置以太网自动连接
+  cat <<'EOF2' > "${MNT_ROOT}/etc/NetworkManager/system-connections/Wired-eth0.nmconnection"
+[connection]
+id=Wired-eth0
+type=ethernet
+autoconnect=true
+autoconnect-priority=999
+
+[ethernet]
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+EOF2
+  chmod 600 "${MNT_ROOT}/etc/NetworkManager/system-connections/Wired-eth0.nmconnection"
+  
+  # 禁用 systemd-networkd（避免冲突）
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable systemd-networkd systemd-networkd.socket" || true
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl mask systemd-networkd systemd-networkd.socket" || true
   
   # 禁用不必要的服务（保留串口和日志）
   log "禁用不必要的服务"
@@ -620,13 +655,43 @@ EOF2
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable man-db.timer" || true
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable e2scrub_all.timer" || true
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable fstrim.timer" || true
+  
+  # 禁用 systemd credentials（减少 tmpfs 挂载）
+  mkdir -p "${MNT_ROOT}/etc/systemd/system/systemd-journald.service.d"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/systemd-journald.service.d/no-credentials.conf"
+[Service]
+LoadCredential=
+EOF2
+  
+  mkdir -p "${MNT_ROOT}/etc/systemd/system/getty@tty1.service.d"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/getty@tty1.service.d/no-credentials.conf"
+[Service]
+LoadCredential=
+EOF2
+  
+  mkdir -p "${MNT_ROOT}/etc/systemd/system/serial-getty@ttyS0.service.d"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/serial-getty@ttyS0.service.d/no-credentials.conf"
+[Service]
+LoadCredential=
+EOF2
 
   # 配置 initramfs 以支持 btrfs
-  mkdir -p "${MNT_ROOT}/etc/initramfs-tools"
+  mkdir -p "${MNT_ROOT}/etc/initramfs-tools/conf.d"
   cat <<'EOF2' > "${MNT_ROOT}/etc/initramfs-tools/conf.d/btrfs"
 # 添加 btrfs 模块到 initramfs
 MODULES=most
+# 使用 zstd 压缩
+COMPRESS=zstd
 EOF2
+
+  # 禁用 btrfs fsck（btrfs 不需要传统的 fsck）
+  mkdir -p "${MNT_ROOT}/etc/initramfs-tools/hooks"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/initramfs-tools/hooks/ignore-btrfs-fsck"
+#!/bin/sh
+# 禁用 btrfs 的 fsck 检查（btrfs 使用自己的检查机制）
+exit 0
+EOF2
+  chmod +x "${MNT_ROOT}/etc/initramfs-tools/hooks/ignore-btrfs-fsck"
 
   mkdir -p "${MNT_ROOT}/etc/ssh/sshd_config.d"
   cat <<'EOF2' > "${MNT_ROOT}/etc/ssh/sshd_config.d/99-root-login.conf"
@@ -643,6 +708,89 @@ EOF2
 
   write_resize_script
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable opi-firstboot-resize.service"
+  
+  # 创建网络检查脚本
+  log "创建网络检查脚本"
+  cat <<'SCRIPT' > "${MNT_ROOT}/usr/local/sbin/network-check.sh"
+#!/usr/bin/env bash
+# 网络连接检查和修复脚本
+
+LOG_FILE="/var/log/network-check.log"
+
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE}"
+}
+
+log "开始网络检查"
+
+# 等待网络接口就绪
+sleep 5
+
+# 检查网络接口
+log "可用网络接口："
+ip link show | grep -E '^[0-9]+:' | tee -a "${LOG_FILE}"
+
+# 检查 NetworkManager 状态
+if systemctl is-active --quiet NetworkManager; then
+  log "NetworkManager 运行中"
+else
+  log "NetworkManager 未运行，尝试启动"
+  systemctl start NetworkManager
+  sleep 3
+fi
+
+# 检查网络连接
+if nmcli -t -f STATE general | grep -q connected; then
+  log "网络已连接"
+  exit 0
+fi
+
+log "网络未连接，尝试修复"
+
+# 重启 NetworkManager
+systemctl restart NetworkManager
+sleep 5
+
+# 手动启动以太网接口
+for iface in $(ls /sys/class/net/ | grep -E '^(eth|end|enp)'); do
+  log "尝试启动接口: ${iface}"
+  ip link set "${iface}" up
+  nmcli device connect "${iface}" || true
+done
+
+sleep 5
+
+# 最终检查
+if nmcli -t -f STATE general | grep -q connected; then
+  log "网络修复成功"
+else
+  log "网络仍未连接，请检查网线和路由器"
+  log "手动调试命令："
+  log "  nmcli device status"
+  log "  ip addr"
+  log "  systemctl status NetworkManager"
+fi
+
+exit 0
+SCRIPT
+  chmod +x "${MNT_ROOT}/usr/local/sbin/network-check.sh"
+  
+  # 创建网络检查服务
+  cat <<'SERVICE' > "${MNT_ROOT}/etc/systemd/system/network-check.service"
+[Unit]
+Description=Network Connection Check
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/network-check.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+  chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable network-check.service"
   
   # 配置 zram（压缩内存交换）
   log "配置 zram"

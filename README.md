@@ -79,6 +79,45 @@ sudo bash -c 'bash <(curl -fsSL "https://raw.githubusercontent.com/imengying/ora
 - 默认密码：`orangepi`
 - 如需修改默认密码，可使用参数：`--root-pass <PASSWORD>`
 
+## 网络配置
+
+系统使用 NetworkManager 管理网络，以太网接口会自动通过 DHCP 获取 IP。
+
+### 首次启动网络检查
+
+系统会自动运行网络检查脚本，日志位于 `/var/log/network-check.log`。
+
+### 网络故障排查
+
+如果无法连接网络，SSH 登录后执行：
+
+```bash
+# 查看网络接口状态
+nmcli device status
+ip addr
+
+# 查看 NetworkManager 状态
+systemctl status NetworkManager
+
+# 手动连接以太网
+nmcli device connect eth0
+
+# 查看网络检查日志
+cat /var/log/network-check.log
+
+# 重启网络服务
+systemctl restart NetworkManager
+```
+
+### 手动配置静态 IP
+
+如需配置静态 IP：
+
+```bash
+nmcli connection modify Wired-eth0 ipv4.method manual ipv4.addresses 192.168.1.100/24 ipv4.gateway 192.168.1.1 ipv4.dns 8.8.8.8
+nmcli connection up Wired-eth0
+```
+
 ## 输出与烧录
 
 输出规则（`--output` 与 `--compress`）：
