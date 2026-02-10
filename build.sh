@@ -720,8 +720,11 @@ configure_rootfs_in_chroot() {
 ${HOSTNAME}
 EOF2
   cat <<EOF2 > "${MNT_ROOT}/etc/hosts"
-127.0.0.1\tlocalhost
-127.0.1.1\t${HOSTNAME}
+127.0.0.1 localhost
+127.0.1.1 ${HOSTNAME}
+::1 localhost ip6-localhost ip6-loopback
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
 EOF2
 
   cat <<EOF2 > "${MNT_ROOT}/etc/apt/sources.list"
