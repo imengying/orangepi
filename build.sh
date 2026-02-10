@@ -413,14 +413,18 @@ from pathlib import Path
 dts_root = Path(sys.argv[1])
 uboot_cfg = Path(sys.argv[2])
 patterns = []
-allowed_prefix = "sun50i-h616-orangepi-zero"
+allowed_markers = ("orangepi-zero", "orangepi_zero")
+
+
+def is_target_name(name):
+    return "sun50i-h616" in name and any(marker in name for marker in allowed_markers)
 
 if uboot_cfg.is_file():
     cfg_text = uboot_cfg.read_text(encoding="utf-8", errors="ignore")
     m = re.search(r'^CONFIG_DEFAULT_DEVICE_TREE="([^"]+)"', cfg_text, re.M)
     if m:
         dt = m.group(1)
-        if allowed_prefix in dt:
+        if is_target_name(dt):
             patterns.extend([
                 f"{dt}.dts",
                 f"{dt}.dtsi",
@@ -436,12 +440,16 @@ patterns = [
     "sun50i-h616-orangepi-zero2*.dtsi",
     "sun50i-h616-orangepi-zero*.dts",
     "sun50i-h616-orangepi-zero*.dtsi",
+    "sun50i-h616-orangepi_zero2*.dts",
+    "sun50i-h616-orangepi_zero2*.dtsi",
+    "sun50i-h616-orangepi_zero*.dts",
+    "sun50i-h616-orangepi_zero*.dtsi",
 ]
 files = []
 seen = set()
 for pattern in patterns:
     for fp in sorted(dts_root.glob(pattern)):
-        if allowed_prefix not in fp.name:
+        if not is_target_name(fp.name):
             continue
         if fp not in seen:
             files.append(fp)
