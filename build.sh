@@ -617,7 +617,7 @@ deb ${MIRROR} ${SUITE}-updates main contrib non-free non-free-firmware
 EOF2
 
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
-  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils zstd"
+  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils zstd locales"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
   
   # 确保 NetworkManager 管理所有网络接口
@@ -721,6 +721,14 @@ EOF2
   log "设置时区为 Asia/Shanghai"
   chroot "${MNT_ROOT}" /bin/bash -c "ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime"
   echo "Asia/Shanghai" > "${MNT_ROOT}/etc/timezone"
+
+  # 设置默认语言环境
+  log "设置默认语言环境为 en_US.UTF-8"
+  echo "en_US.UTF-8 UTF-8" > "${MNT_ROOT}/etc/locale.gen"
+  chroot "${MNT_ROOT}" /bin/bash -c "locale-gen en_US.UTF-8"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/default/locale"
+LANG=en_US.UTF-8
+EOF2
 
   cat <<'EOF2' > "${MNT_ROOT}/etc/fstab"
 /dev/mmcblk0p2 / btrfs defaults,compress=zstd 0 1

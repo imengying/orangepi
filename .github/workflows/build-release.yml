@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -49,6 +50,7 @@ jobs:
           path: ${{ steps.output.outputs.file }}
 
       - name: Publish to GitHub Releases
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}

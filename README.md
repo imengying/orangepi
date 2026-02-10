@@ -18,11 +18,17 @@
 推荐使用 GitHub Actions 进行构建：
 
 1.  **Fork 本仓库** 到你的 GitHub 账号。
-2.  进入你的仓库页面，点击顶部的 **Actions** 选项卡。
-3.  在左侧选择 **Build Image** 工作流（如果未启用，点击绿色按钮启用）。
-4.  点击右侧的 **Run workflow** 按钮。
-5.  （可选）输入自定义参数（如 tag 或分支），点击绿色 **Run workflow** 按钮开始构建。
-6.  等待构建完成，在 Summary 页面下载生成的 Artifacts (`.img.xz`)。
+2.  本地创建并推送一个 Tag（发布构建）：
+
+```bash
+git tag v2026.02.10
+git push origin v2026.02.10
+```
+
+3.  打开仓库 **Actions**，查看 `Build And Release OrangePi Image` 工作流进度。
+4.  构建完成后，在 **Releases** 或 **Artifacts** 下载 `.img.xz` 镜像。
+
+如只想临时测试构建，可在 Actions 页面手动 `Run workflow`，该模式仅上传 Artifacts，不发布 Release。
 
 ## 💻 本地构建 (可选)
 
@@ -30,11 +36,14 @@
 
 ```bash
 # 克隆仓库
-git clone [https://github.com/imengying/orangepi.git](https://github.com/imengying/orangepi.git)
+git clone https://github.com/imengying/orangepi.git
 cd orangepi
 
 # 安装必要依赖 (仅供参考，具体视环境而定)
-sudo apt update && sudo apt install -y debootstrap qemu-user-static binfmt-support build-essential git flex bison libssl-dev bc kmod cpio
+sudo apt update && sudo apt install -y \
+  debootstrap qemu-user-static parted util-linux dosfstools btrfs-progs \
+  rsync xz-utils git make gcc-aarch64-linux-gnu bc bison flex openssl \
+  libssl-dev device-tree-compiler swig python3
 
 # 开始构建
 sudo ./build.sh
@@ -62,6 +71,7 @@ sudo ./build.sh
 
 * **用户**: `root`
 * **密码**: `orangepi`
+* **语言环境**: `en_US.UTF-8`
 * **时区**: `Asia/Shanghai`
 * **分区**: `/boot` (FAT32, 128MB), `/` (Btrfs, 剩余空间)
 
@@ -99,7 +109,7 @@ nmcli connection up Wired-end0
 
 ## 📜 License
 
-本项目基于 [MIT License](https://www.google.com/search?q=LICENSE) 开源。
+本项目基于 [MIT License](LICENSE) 开源。
 
 ```text
 MIT License
@@ -123,9 +133,5 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-```
-
-```
 
 ```
