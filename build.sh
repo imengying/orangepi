@@ -102,29 +102,9 @@ ensure_loop_support() {
     return
   fi
 
-  if command -v modprobe >/dev/null 2>&1; then
-    modprobe loop >/dev/null 2>&1 || true
-  fi
-
-  if [[ -e /dev/loop-control ]]; then
-    local i
-    for i in $(seq 0 7); do
-      if [[ ! -e "/dev/loop${i}" ]]; then
-        mknod -m 660 "/dev/loop${i}" b 7 "${i}" >/dev/null 2>&1 || true
-      fi
-    done
-    chown root:disk /dev/loop[0-7] >/dev/null 2>&1 || true
-  fi
-
-  if losetup -f >/dev/null 2>&1; then
-    return
-  fi
-
   echo "未找到可用 loop 设备（losetup -f 失败）。"
-  echo "请确认当前环境支持 loop 设备："
-  echo "  1) 在宿主机执行: modprobe loop"
-  echo "  2) 确认存在: /dev/loop-control 和 /dev/loop0"
-  echo "  3) 若在容器/受限云主机，请开启 loop 设备权限或改用支持 loop 的 VM"
+  echo "请确认当前环境已启用 loop 设备（需要 /dev/loop-control 和可用 /dev/loopN）。"
+  echo "若在容器/受限环境中运行，请开启 loop 设备权限或改用支持 loop 的 VM。"
   exit 1
 }
 
@@ -576,9 +556,6 @@ build_kernel() {
 
   local dtb_file="${KERNEL_SRC_DIR}/arch/arm64/boot/dts/allwinner/sun50i-h616-orangepi-zero2.dtb"
   if [[ ! -f "${dtb_file}" ]]; then
-    dtb_file=$(find "${KERNEL_SRC_DIR}/arch/arm64/boot/dts" -type f -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
-  fi
-  if [[ -z "${dtb_file}" || ! -f "${dtb_file}" ]]; then
     echo "未找到 DTB: sun50i-h616-orangepi-zero2.dtb"
     exit 1
   fi
@@ -1014,12 +991,11 @@ install_compiled_kernel() {
 install_boot_assets() {
   log "写入 extlinux 配置"
   local dtb_rel
-  dtb_rel=$(find "${MNT_BOOT}/dtb" -type f -name "sun50i-h616-orangepi-zero2.dtb" | head -n1 || true)
-  if [[ -z "${dtb_rel}" ]]; then
+  dtb_rel="dtb/sun50i-h616-orangepi-zero2.dtb"
+  if [[ ! -f "${MNT_BOOT}/${dtb_rel}" ]]; then
     echo "启动分区未找到 DTB: sun50i-h616-orangepi-zero2.dtb"
     exit 1
   fi
-  dtb_rel=${dtb_rel#"${MNT_BOOT}/"}
 
   mkdir -p "${MNT_BOOT}/extlinux"
   cat <<EOF2 > "${MNT_BOOT}/extlinux/extlinux.conf"
