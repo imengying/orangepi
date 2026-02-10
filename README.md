@@ -16,32 +16,6 @@
 - **精简配置**：移除 WiFi/蓝牙固件（有线网络可用，减小镜像体积），禁用不必要的系统服务。
 - **内核版本**：显示完整版本号（如 6.12.69）。
 
-## 依赖
-
-需要以下软件包：
-
-- debootstrap
-- qemu-user-static
-- parted
-- util-linux
-- dosfstools
-- btrfs-progs
-- rsync
-- xz-utils
-- coreutils
-- git
-- make
-- gcc-aarch64-linux-gnu
-- bc
-- bison
-- flex
-- libssl-dev
-- libelf-dev
-- libgnutls28-dev
-- device-tree-compiler
-- swig
-- python3
-
 ## 使用方法
 
 ```bash
@@ -77,45 +51,36 @@ sudo bash -c 'bash <(curl -fsSL "https://raw.githubusercontent.com/imengying/ora
 
 - 默认账号：`root`
 - 默认密码：`orangepi`
+- 默认时区：`Asia/Shanghai`（中国上海）
 - 如需修改默认密码，可使用参数：`--root-pass <PASSWORD>`
+
+### 修改时区
+
+如需修改时区：
+
+```bash
+# 查看可用时区
+timedatectl list-timezones
+
+# 设置时区（例如：UTC）
+timedatectl set-timezone UTC
+
+# 或者手动设置
+ln -sf /usr/share/zoneinfo/America/New_York /etc/localtime
+echo "America/New_York" > /etc/timezone
+```
 
 ## 网络配置
 
-系统使用 NetworkManager 管理网络，以太网接口会自动通过 DHCP 获取 IP。
-
-### 首次启动网络检查
-
-系统会自动运行网络检查脚本，日志位于 `/var/log/network-check.log`。
-
-### 网络故障排查
-
-如果无法连接网络，SSH 登录后执行：
-
-```bash
-# 查看网络接口状态
-nmcli device status
-ip addr
-
-# 查看 NetworkManager 状态
-systemctl status NetworkManager
-
-# 手动连接以太网
-nmcli device connect eth0
-
-# 查看网络检查日志
-cat /var/log/network-check.log
-
-# 重启网络服务
-systemctl restart NetworkManager
-```
+系统使用 NetworkManager 管理网络，以太网接口 `end0` 会自动通过 DHCP 获取 IP。
 
 ### 手动配置静态 IP
 
 如需配置静态 IP：
 
 ```bash
-nmcli connection modify Wired-eth0 ipv4.method manual ipv4.addresses 192.168.1.100/24 ipv4.gateway 192.168.1.1 ipv4.dns 8.8.8.8
-nmcli connection up Wired-eth0
+nmcli connection modify Wired-end0 ipv4.method manual ipv4.addresses 192.168.1.100/24 ipv4.gateway 192.168.1.1 ipv4.dns 8.8.8.8
+nmcli connection up Wired-end0
 ```
 
 ## 输出与烧录

@@ -92,7 +92,7 @@ check_deps() {
 
   if [[ "${#missing[@]}" -ne 0 ]]; then
     echo "缺少依赖命令: ${missing[*]}"
-    echo "请先安装依赖后重试（见 README.md）"
+    echo "请先安装依赖后重试（可参考 .github/workflows/build-release.yml 的 Install dependencies 步骤）"
     exit 1
   fi
 }
@@ -626,11 +626,12 @@ EOF2
 unmanaged-devices=none
 EOF2
 
-  # 配置以太网自动连接
-  cat <<'EOF2' > "${MNT_ROOT}/etc/NetworkManager/system-connections/Wired-eth0.nmconnection"
+  # 配置 end0 自动连接
+  cat <<'EOF2' > "${MNT_ROOT}/etc/NetworkManager/system-connections/Wired-end0.nmconnection"
 [connection]
-id=Wired-eth0
+id=Wired-end0
 type=ethernet
+interface-name=end0
 autoconnect=true
 autoconnect-priority=999
 
@@ -642,7 +643,7 @@ method=auto
 [ipv6]
 method=auto
 EOF2
-  chmod 600 "${MNT_ROOT}/etc/NetworkManager/system-connections/Wired-eth0.nmconnection"
+  chmod 600 "${MNT_ROOT}/etc/NetworkManager/system-connections/Wired-end0.nmconnection"
   
   # 禁用 systemd-networkd（避免冲突）
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable systemd-networkd systemd-networkd.socket" || true
@@ -656,23 +657,33 @@ EOF2
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable e2scrub_all.timer" || true
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable fstrim.timer" || true
   
-  # 禁用 systemd credentials（减少 tmpfs 挂载）
+  # 彻底禁用 systemd credentials（使用 systemd drop-in）
+  log "禁用 systemd credentials"
   mkdir -p "${MNT_ROOT}/etc/systemd/system/systemd-journald.service.d"
-  cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/systemd-journald.service.d/no-credentials.conf"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/systemd-journald.service.d/override.conf"
 [Service]
 LoadCredential=
+LoadCredentialEncrypted=
+SetCredential=
+SetCredentialEncrypted=
 EOF2
   
-  mkdir -p "${MNT_ROOT}/etc/systemd/system/getty@tty1.service.d"
-  cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/getty@tty1.service.d/no-credentials.conf"
+  mkdir -p "${MNT_ROOT}/etc/systemd/system/serial-getty@.service.d"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/serial-getty@.service.d/override.conf"
 [Service]
 LoadCredential=
+LoadCredentialEncrypted=
+SetCredential=
+SetCredentialEncrypted=
 EOF2
   
-  mkdir -p "${MNT_ROOT}/etc/systemd/system/serial-getty@ttyS0.service.d"
-  cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/serial-getty@ttyS0.service.d/no-credentials.conf"
+  mkdir -p "${MNT_ROOT}/etc/systemd/system/getty@.service.d"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/systemd/system/getty@.service.d/override.conf"
 [Service]
 LoadCredential=
+LoadCredentialEncrypted=
+SetCredential=
+SetCredentialEncrypted=
 EOF2
 
   # 配置 initramfs 以支持 btrfs
@@ -682,6 +693,8 @@ EOF2
 MODULES=most
 # 使用 zstd 压缩
 COMPRESS=zstd
+# 避免 fsck hook 在 chroot 中探测 /dev/mmcblk0p2 触发告警
+FSTYPE=btrfs
 EOF2
 
   # 禁用 btrfs fsck（btrfs 不需要传统的 fsck）
@@ -701,6 +714,11 @@ EOF2
 
   echo "root:${ROOT_PASS}" | chroot "${MNT_ROOT}" chpasswd
 
+  # 设置时区为上海
+  log "设置时区为 Asia/Shanghai"
+  chroot "${MNT_ROOT}" /bin/bash -c "ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime"
+  echo "Asia/Shanghai" > "${MNT_ROOT}/etc/timezone"
+
   cat <<'EOF2' > "${MNT_ROOT}/etc/fstab"
 /dev/mmcblk0p2 / btrfs defaults,compress=zstd 0 1
 /dev/mmcblk0p1 /boot vfat defaults 0 2
@@ -708,89 +726,6 @@ EOF2
 
   write_resize_script
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable opi-firstboot-resize.service"
-  
-  # 创建网络检查脚本
-  log "创建网络检查脚本"
-  cat <<'SCRIPT' > "${MNT_ROOT}/usr/local/sbin/network-check.sh"
-#!/usr/bin/env bash
-# 网络连接检查和修复脚本
-
-LOG_FILE="/var/log/network-check.log"
-
-log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE}"
-}
-
-log "开始网络检查"
-
-# 等待网络接口就绪
-sleep 5
-
-# 检查网络接口
-log "可用网络接口："
-ip link show | grep -E '^[0-9]+:' | tee -a "${LOG_FILE}"
-
-# 检查 NetworkManager 状态
-if systemctl is-active --quiet NetworkManager; then
-  log "NetworkManager 运行中"
-else
-  log "NetworkManager 未运行，尝试启动"
-  systemctl start NetworkManager
-  sleep 3
-fi
-
-# 检查网络连接
-if nmcli -t -f STATE general | grep -q connected; then
-  log "网络已连接"
-  exit 0
-fi
-
-log "网络未连接，尝试修复"
-
-# 重启 NetworkManager
-systemctl restart NetworkManager
-sleep 5
-
-# 手动启动以太网接口
-for iface in $(ls /sys/class/net/ | grep -E '^(eth|end|enp)'); do
-  log "尝试启动接口: ${iface}"
-  ip link set "${iface}" up
-  nmcli device connect "${iface}" || true
-done
-
-sleep 5
-
-# 最终检查
-if nmcli -t -f STATE general | grep -q connected; then
-  log "网络修复成功"
-else
-  log "网络仍未连接，请检查网线和路由器"
-  log "手动调试命令："
-  log "  nmcli device status"
-  log "  ip addr"
-  log "  systemctl status NetworkManager"
-fi
-
-exit 0
-SCRIPT
-  chmod +x "${MNT_ROOT}/usr/local/sbin/network-check.sh"
-  
-  # 创建网络检查服务
-  cat <<'SERVICE' > "${MNT_ROOT}/etc/systemd/system/network-check.service"
-[Unit]
-Description=Network Connection Check
-After=NetworkManager.service
-Wants=NetworkManager.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/network-check.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-SERVICE
-  chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable network-check.service"
   
   # 配置 zram（压缩内存交换）
   log "配置 zram"
@@ -982,11 +917,12 @@ install_compiled_kernel() {
   cp "${ASSETS_DIR}/${ASSET_KERNEL_NAME}" "${MNT_BOOT}/${ASSET_KERNEL_NAME}"
   mkdir -p "${MNT_BOOT}/dtb"
   rsync -a "${ASSETS_DIR}/dtb/" "${MNT_BOOT}/dtb/"
+  cp "${ASSETS_DIR}/config-${KERNEL_RELEASE}" "${MNT_BOOT}/config-${KERNEL_RELEASE}"
 
-  # 不复制 System.map 和 config 到 /boot（节省空间）
+  # 不复制 vmlinuz/System.map 到 /boot（节省空间）
+  # config 仅用于 update-initramfs 探测能力，后续会清理
   # cp "${ASSETS_DIR}/${ASSET_KERNEL_NAME}" "${MNT_ROOT}/boot/vmlinuz-${KERNEL_RELEASE}"
   # cp "${ASSETS_DIR}/System.map-${KERNEL_RELEASE}" "${MNT_ROOT}/boot/System.map-${KERNEL_RELEASE}"
-  # cp "${ASSETS_DIR}/config-${KERNEL_RELEASE}" "${MNT_ROOT}/boot/config-${KERNEL_RELEASE}"
 
   chroot "${MNT_ROOT}" /bin/bash -c "depmod -a '${KERNEL_RELEASE}'"
   chroot "${MNT_ROOT}" /bin/bash -c "update-initramfs -c -k '${KERNEL_RELEASE}'"
