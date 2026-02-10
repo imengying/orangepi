@@ -1,6 +1,6 @@
 # 香橙派 Zero 2 (Orange Pi Zero 2) Debian 13 系统镜像构建脚本
 
-本仓库专为 **香橙派 Zero 2 (Orange Pi Zero 2 / Allwinner H616)** 设计，提供了一套基于 **GitHub Actions** 的自动化构建流程，用于生成采用 **Btrfs 文件系统** 的 **Debian 13 (Trixie)** Arm64 启动镜像。
+本仓库为 **香橙派 Zero 2 (Orange Pi Zero 2 / Allwinner H616)** 设计，提供了一套基于 **GitHub Actions** 的自动化构建流程，用于生成采用 **Btrfs 文件系统** 的 **Debian 13 (Trixie)** Arm64 启动镜像。
 
 ## ✨ 项目特性
 
