@@ -479,6 +479,8 @@ build_kernel() {
   log "编译 Linux 内核"
   make -C "${KERNEL_SRC_DIR}" mrproper
   set_dtb_led_defaults
+  # 设备树补丁会让源码树变为 dirty；写入空 .scmversion 避免版本名追加 -dirty
+  : > "${KERNEL_SRC_DIR}/.scmversion"
   if make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- "${KERNEL_DEFCONFIG}" >/dev/null 2>&1; then
     log "使用内核配置: ${KERNEL_DEFCONFIG}"
   else
@@ -544,9 +546,20 @@ build_kernel() {
 
   make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
-  make -C "${KERNEL_SRC_DIR}" -j"${JOBS}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image modules dtbs
+  # 再次校验，确保不会带上 -dirty 后缀
+  if grep -q '^CONFIG_LOCALVERSION_AUTO=y' "${KERNEL_SRC_DIR}/.config"; then
+    log "强制关闭 CONFIG_LOCALVERSION_AUTO（避免 -dirty 后缀）"
+    if [[ -x "${KERNEL_SRC_DIR}/scripts/config" ]]; then
+      "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_SRC_DIR}/.config" \
+        --set-str LOCALVERSION "" \
+        --disable LOCALVERSION_AUTO
+      make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+    fi
+  fi
 
-  KERNEL_RELEASE=$(make -s -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kernelrelease)
+  make -C "${KERNEL_SRC_DIR}" -j"${JOBS}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= Image modules dtbs
+
+  KERNEL_RELEASE=$(make -s -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= kernelrelease)
   if [[ -z "${KERNEL_RELEASE}" ]]; then
     echo "无法确定内核版本 (kernelrelease)"
     exit 1
