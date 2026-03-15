@@ -3,24 +3,25 @@ set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0")
 
-IMAGE_SIZE="3G"
-SUITE="trixie"
-ARCH="arm64"
-HOSTNAME="orangepi"
-MIRROR="http://mirrors.ustc.edu.cn/debian"
-OUTPUT="$(pwd)/orangepi-zero2-debian13-trixie-btrfs.img"
-COMPRESS="xz"
-WORKDIR=""
-ROOT_PASS="orangepi"
+IMAGE_SIZE="${IMAGE_SIZE:-3G}"
+SUITE="${SUITE:-trixie}"
+ARCH="${ARCH:-arm64}"
+HOSTNAME="${HOSTNAME:-orangepi}"
+MIRROR="${MIRROR:-http://mirrors.ustc.edu.cn/debian}"
+OUTPUT="${OUTPUT:-$(pwd)/orangepi-zero2-debian13-trixie-btrfs.img}"
+COMPRESS="${COMPRESS:-xz}"
+WORKDIR="${WORKDIR:-}"
+ROOT_PASS="${ROOT_PASS:-orangepi}"
 
-KERNEL_REPO="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
-KERNEL_REF="6.12"
-KERNEL_DEFCONFIG="defconfig"
-UBOOT_REPO="https://github.com/u-boot/u-boot.git"
-UBOOT_REF="v2025.01"
-ATF_REPO="https://github.com/ARM-software/arm-trusted-firmware.git"
-ATF_REF="v2.12.0"
-JOBS="$(nproc)"
+KERNEL_REPO="${KERNEL_REPO:-https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git}"
+KERNEL_REF="${KERNEL_REF:-6.12}"
+KERNEL_DEFCONFIG="${KERNEL_DEFCONFIG:-defconfig}"
+UBOOT_REPO="${UBOOT_REPO:-https://github.com/u-boot/u-boot.git}"
+UBOOT_REF="${UBOOT_REF:-v2025.01}"
+ATF_REPO="${ATF_REPO:-https://github.com/ARM-software/arm-trusted-firmware.git}"
+ATF_REF="${ATF_REF:-v2.12.0}"
+JOBS="${JOBS:-$(nproc)}"
+BTRFS_ROOT_SUBVOL="${BTRFS_ROOT_SUBVOL:-@}"
 
 LOOP_OUTPUT=""
 WORKDIR_CREATED=""
@@ -79,7 +80,7 @@ require_root() {
 
 check_deps() {
   local deps=(
-    debootstrap qemu-aarch64-static parted losetup mkfs.vfat mkfs.btrfs mount mountpoint
+    debootstrap qemu-aarch64-static parted losetup mkfs.vfat mkfs.btrfs btrfs mount mountpoint
     rsync xz chroot lsblk git make aarch64-linux-gnu-gcc bc bison flex openssl dtc swig python3
   )
   local missing=()
@@ -602,16 +603,34 @@ format_partitions() {
 
 mount_partitions() {
   mount -o compress=zstd "${LOOP_OUTPUT}p2" "${MNT_ROOT}"
+  btrfs subvolume create "${MNT_ROOT}/${BTRFS_ROOT_SUBVOL}" >/dev/null
+  umount "${MNT_ROOT}"
+  mount -o "compress=zstd,subvol=${BTRFS_ROOT_SUBVOL}" "${LOOP_OUTPUT}p2" "${MNT_ROOT}"
   mkdir -p "${MNT_BOOT}"
   mount "${LOOP_OUTPUT}p1" "${MNT_BOOT}"
 }
 
 prepare_dns() {
-  if [[ -f /etc/resolv.conf ]]; then
-    cp /etc/resolv.conf "${MNT_ROOT}/etc/resolv.conf"
-  else
-    echo "nameserver 1.1.1.1" > "${MNT_ROOT}/etc/resolv.conf"
+  local target="${MNT_ROOT}/etc/resolv.conf"
+
+  if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+    cp /run/systemd/resolve/resolv.conf "${target}"
+    return
   fi
+
+  if [[ -f /etc/resolv.conf ]]; then
+    awk '
+      $1 == "nameserver" && $2 !~ /^(127\.|::1$|0:0:0:0:0:0:0:1$)/ { print }
+    ' /etc/resolv.conf > "${target}"
+    if [[ -s "${target}" ]]; then
+      return
+    fi
+  fi
+
+  cat <<'EOF2' > "${target}"
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF2
 }
 
 build_debian_rootfs() {
@@ -639,6 +658,58 @@ log() {
   logger -t opi-firstboot-resize "$*"
 }
 
+bytes_to_mib() {
+  echo "$(( $1 / 1024 / 1024 ))"
+}
+
+read_partition_size() {
+  blockdev --getsize64 /dev/mmcblk0p2 2>/dev/null || echo 0
+}
+
+partition_resize_state() {
+  local disk_size sector_size start_sectors part_size max_size margin
+
+  disk_size=$(blockdev --getsize64 /dev/mmcblk0 2>/dev/null || echo 0)
+  sector_size=$(cat /sys/class/block/mmcblk0/queue/logical_block_size 2>/dev/null || echo 512)
+  start_sectors=$(cat /sys/class/block/mmcblk0p2/start 2>/dev/null || echo 0)
+  part_size=$(read_partition_size)
+
+  if (( disk_size <= 0 || sector_size <= 0 || start_sectors <= 0 || part_size <= 0 )); then
+    echo "unknown"
+    return
+  fi
+
+  max_size=$((disk_size - start_sectors * sector_size))
+  margin=$((4 * 1024 * 1024))
+
+  if (( part_size + margin < max_size )); then
+    echo "can-grow"
+  else
+    echo "full"
+  fi
+}
+
+run_partition_resize() {
+  if command -v growpart >/dev/null 2>&1; then
+    log "使用 growpart 扩展分区"
+    if growpart /dev/mmcblk0 2; then
+      return 0
+    fi
+    log "growpart 失败，回退到 sfdisk/parted"
+  fi
+
+  if command -v sfdisk >/dev/null 2>&1; then
+    log "使用 sfdisk 扩展分区"
+    if echo ", +" | sfdisk --no-reread -N 2 /dev/mmcblk0; then
+      return 0
+    fi
+    log "sfdisk 失败，回退到 parted"
+  fi
+
+  log "使用 parted 扩展分区"
+  parted -s /dev/mmcblk0 resizepart 2 100%
+}
+
 if [[ -f "${DONE_FILE}" ]]; then
   log "已完成，退出。"
   exit 0
@@ -646,32 +717,34 @@ fi
 
 log "开始扩容 /dev/mmcblk0p2"
 
-# 使用 growpart 扩展分区（更可靠）
-if command -v growpart >/dev/null 2>&1; then
-  log "使用 growpart 扩展分区"
-  if ! growpart /dev/mmcblk0 2; then
-    log "growpart 失败，回退到 sfdisk/parted"
-    if command -v sfdisk >/dev/null 2>&1; then
-      echo ", +" | sfdisk --no-reread -N 2 /dev/mmcblk0 || log "sfdisk 失败"
-    else
-      parted -s /dev/mmcblk0 resizepart 2 100% || log "parted 失败"
-    fi
-  fi
-elif command -v sfdisk >/dev/null 2>&1; then
-  log "使用 sfdisk 扩展分区"
-  echo ", +" | sfdisk --no-reread -N 2 /dev/mmcblk0 || log "sfdisk 失败"
+old_size=$(read_partition_size)
+log "当前分区大小: $(bytes_to_mib "${old_size}") MB"
+
+if run_partition_resize; then
+  log "分区扩容命令执行完成"
 else
-  log "使用 parted 扩展分区"
-  parted -s /dev/mmcblk0 resizepart 2 100% || log "parted 失败"
+  log "分区扩容命令返回失败，继续检查实际分区大小"
 fi
 
 log "刷新分区表"
 partprobe /dev/mmcblk0 2>/dev/null || blockdev --rereadpt /dev/mmcblk0 2>/dev/null || true
+udevadm settle 2>/dev/null || true
 
 sleep 3
 
-new_size=$(blockdev --getsize64 /dev/mmcblk0p2 2>/dev/null || echo 0)
-log "分区大小: $((new_size / 1024 / 1024)) MB"
+new_size=$(read_partition_size)
+log "分区大小: $(bytes_to_mib "${new_size}") MB"
+
+case "$(partition_resize_state)" in
+  can-grow)
+    log "分区尚未扩展到磁盘末尾，保留服务以便下次重试"
+    exit 1
+    ;;
+  unknown)
+    log "无法判断分区是否已扩展到磁盘末尾，保留服务以便下次重试"
+    exit 1
+    ;;
+esac
 
 log "扩容 btrfs 文件系统"
 if btrfs filesystem resize max / 2>&1 | tee -a /var/log/opi-resize.log; then
@@ -829,8 +902,8 @@ EOF2
 LANG=en_US.UTF-8
 EOF2
 
-  cat <<'EOF2' > "${MNT_ROOT}/etc/fstab"
-/dev/mmcblk0p2 / btrfs defaults,compress=zstd 0 1
+  cat <<EOF2 > "${MNT_ROOT}/etc/fstab"
+/dev/mmcblk0p2 / btrfs defaults,compress=zstd,subvol=${BTRFS_ROOT_SUBVOL} 0 1
 /dev/mmcblk0p1 /boot vfat defaults 0 2
 EOF2
 
@@ -993,6 +1066,8 @@ install_compiled_kernel() {
     # 重新生成模块依赖
     chroot "${MNT_ROOT}" /bin/bash -c "depmod -a '${KERNEL_RELEASE}'" || true
   fi
+
+  rm -f "${MNT_ROOT}/usr/bin/qemu-aarch64-static"
   
   # 清理 boot 分区不必要的文件
   log "清理 boot 分区"
@@ -1016,7 +1091,7 @@ LABEL DebianTrixie
   LINUX /${ASSET_KERNEL_NAME}
   INITRD /${ASSET_INITRD_NAME}
   FDT /${dtb_rel}
-  APPEND root=/dev/mmcblk0p2 rootfstype=btrfs rootwait rw console=ttyS0,115200 console=tty1
+  APPEND root=/dev/mmcblk0p2 rootfstype=btrfs rootflags=subvol=${BTRFS_ROOT_SUBVOL},compress=zstd rootwait rw console=ttyS0,115200 console=tty1
 EOF2
 }
 
