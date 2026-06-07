@@ -41,13 +41,21 @@ jobs:
             echo "未找到构建产物 (*.img.xz)"
             exit 1
           fi
+          UPDATE_PATH="$(find . -maxdepth 1 -type f -name 'orangepi-zero2-kernel-*-update.tar.xz' | head -n1)"
+          if [[ -z "${UPDATE_PATH}" ]]; then
+            echo "未找到内核更新包 (*-update.tar.xz)"
+            exit 1
+          fi
           echo "file=${FILE_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "update=${UPDATE_PATH}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: orangepi-image-${{ github.ref_name }}
-          path: ${{ steps.output.outputs.file }}
+          path: |
+            ${{ steps.output.outputs.file }}
+            ${{ steps.output.outputs.update }}
 
       - name: Publish to GitHub Releases
         if: github.event_name == 'push'
@@ -58,3 +66,4 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             ${{ steps.output.outputs.file }}
+            ${{ steps.output.outputs.update }}

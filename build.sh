@@ -10,6 +10,7 @@ HOSTNAME="${HOSTNAME:-orangepi}"
 MIRROR="${MIRROR:-http://mirrors.ustc.edu.cn/debian}"
 OUTPUT="${OUTPUT:-$(pwd)/orangepi-zero2-debian13-trixie-btrfs.img}"
 COMPRESS="${COMPRESS:-xz}"
+UPDATE_BUNDLE="${UPDATE_BUNDLE:-auto}"
 WORKDIR="${WORKDIR:-}"
 ROOT_PASS="${ROOT_PASS:-orangepi}"
 
@@ -36,6 +37,7 @@ ATF_BL31=""
 KERNEL_RELEASE=""
 ASSET_KERNEL_NAME="Image"
 ASSET_INITRD_NAME=""
+UPDATE_BUNDLE_OUTPUT=""
 
 log() {
   echo "[${SCRIPT_NAME}] $*"
@@ -81,7 +83,7 @@ require_root() {
 check_deps() {
   local deps=(
     debootstrap qemu-aarch64-static parted losetup mkfs.vfat mkfs.btrfs btrfs mount mountpoint
-    rsync xz chroot lsblk git make aarch64-linux-gnu-gcc bc bison flex openssl dtc swig python3
+    rsync tar xz chroot lsblk git make aarch64-linux-gnu-gcc bc bison flex openssl dtc swig python3
   )
   local missing=()
 
@@ -140,6 +142,10 @@ parse_args() {
         COMPRESS="$2"
         shift 2
         ;;
+      --update-bundle)
+        UPDATE_BUNDLE="$2"
+        shift 2
+        ;;
       --workdir)
         WORKDIR="$2"
         shift 2
@@ -195,6 +201,15 @@ validate_args() {
       ;;
     *)
       echo "无效参数: --compress ${COMPRESS} (仅支持 xz|none)"
+      exit 1
+      ;;
+  esac
+
+  case "${UPDATE_BUNDLE}" in
+    auto|yes|no)
+      ;;
+    *)
+      echo "无效参数: --update-bundle ${UPDATE_BUNDLE} (仅支持 auto|yes|no)"
       exit 1
       ;;
   esac
@@ -513,6 +528,9 @@ build_kernel() {
       --enable USB_MUSB_HDRC \
       --enable USB_MUSB_SUNXI \
       --enable PHY_SUN4I_USB \
+      --disable MICROSEMI_PHY \
+      --disable USB_XHCI_RCAR \
+      --disable USB_XHCI_TEGRA \
       --enable EXTCON \
       --enable EXTCON_USB_GPIO \
       --disable WLAN \
@@ -541,6 +559,47 @@ build_kernel() {
       --enable MMC_SUNXI \
       --enable STMMAC_ETH \
       --enable DWMAC_SUN8I \
+      --enable NETFILTER \
+      --enable NETFILTER_ADVANCED \
+      --enable NETFILTER_NETLINK \
+      --module NETFILTER_NETLINK_LOG \
+      --module NETFILTER_NETLINK_QUEUE \
+      --module NF_CONNTRACK \
+      --module NF_CT_NETLINK \
+      --module NF_NAT \
+      --enable NF_TABLES \
+      --enable NF_TABLES_INET \
+      --enable NF_TABLES_NETDEV \
+      --enable NF_TABLES_ARP \
+      --module NFT_NUMGEN \
+      --module NFT_CT \
+      --module NFT_LOG \
+      --module NFT_LIMIT \
+      --module NFT_MASQ \
+      --module NFT_REDIR \
+      --module NFT_NAT \
+      --module NFT_QUEUE \
+      --module NFT_QUOTA \
+      --module NFT_REJECT \
+      --module NFT_COMPAT \
+      --module NFT_HASH \
+      --module NFT_FIB_INET \
+      --module NFT_DUP_IPV4 \
+      --module NFT_FIB_IPV4 \
+      --module NFT_DUP_IPV6 \
+      --module NFT_FIB_IPV6 \
+      --module NETFILTER_XTABLES \
+      --module IP_NF_IPTABLES \
+      --module IP_NF_NAT \
+      --module IP_NF_TARGET_MASQUERADE \
+      --module IP_NF_TARGET_REDIRECT \
+      --module IP_NF_TARGET_REJECT \
+      --module IP_NF_RAW \
+      --module IP6_NF_IPTABLES \
+      --module IP6_NF_NAT \
+      --module IP6_NF_TARGET_MASQUERADE \
+      --module IP6_NF_TARGET_REJECT \
+      --module IP6_NF_RAW \
       --set-str LOCALVERSION "" \
       --disable LOCALVERSION_AUTO
   fi
@@ -1042,7 +1101,7 @@ install_compiled_kernel() {
   cp "${ASSETS_DIR}/config-${KERNEL_RELEASE}" "${MNT_BOOT}/config-${KERNEL_RELEASE}"
 
   # 不复制 vmlinuz/System.map 到 /boot（节省空间）
-  # config 仅用于 update-initramfs 探测能力，后续会清理
+  # 保留 config，板子上后续 update-initramfs 需要它检查 initrd 压缩支持。
   # cp "${ASSETS_DIR}/${ASSET_KERNEL_NAME}" "${MNT_ROOT}/boot/vmlinuz-${KERNEL_RELEASE}"
   # cp "${ASSETS_DIR}/System.map-${KERNEL_RELEASE}" "${MNT_ROOT}/boot/System.map-${KERNEL_RELEASE}"
 
@@ -1073,7 +1132,6 @@ install_compiled_kernel() {
   log "清理 boot 分区"
   rm -f "${MNT_ROOT}/boot/vmlinuz-${KERNEL_RELEASE}" 2>/dev/null || true
   rm -f "${MNT_ROOT}/boot/System.map-${KERNEL_RELEASE}" 2>/dev/null || true
-  rm -f "${MNT_ROOT}/boot/config-${KERNEL_RELEASE}" 2>/dev/null || true
 }
 
 install_boot_assets() {
@@ -1093,6 +1151,292 @@ LABEL DebianTrixie
   FDT /${dtb_rel}
   APPEND root=/dev/mmcblk0p2 rootfstype=btrfs rootflags=subvol=${BTRFS_ROOT_SUBVOL},compress=zstd rootwait rw console=ttyS0,115200 console=tty1
 EOF2
+}
+
+create_update_bundle() {
+  if [[ "${UPDATE_BUNDLE}" == "no" ]]; then
+    return
+  fi
+
+  log "打包已安装系统内核更新包"
+
+  local bundle_name="orangepi-zero2-kernel-${KERNEL_RELEASE}-update"
+  local bundle_dir="${WORKDIR_CREATED}/${bundle_name}"
+  local payload_dir="${bundle_dir}/payload"
+  local output_dir
+  output_dir=$(dirname "${OUTPUT}")
+  UPDATE_BUNDLE_OUTPUT="${output_dir}/${bundle_name}.tar.xz"
+
+  rm -rf "${bundle_dir}" "${UPDATE_BUNDLE_OUTPUT}"
+  mkdir -p "${payload_dir}/boot/dtb" "${payload_dir}/lib/modules"
+
+  cp "${MNT_BOOT}/${ASSET_KERNEL_NAME}" "${payload_dir}/boot/${ASSET_KERNEL_NAME}"
+  cp "${MNT_BOOT}/${ASSET_INITRD_NAME}" "${payload_dir}/boot/${ASSET_INITRD_NAME}"
+  cp "${MNT_BOOT}/config-${KERNEL_RELEASE}" "${payload_dir}/boot/config-${KERNEL_RELEASE}"
+  cp "${MNT_BOOT}/dtb/sun50i-h616-orangepi-zero2.dtb" "${payload_dir}/boot/dtb/"
+  cp -a "${MNT_ROOT}/lib/modules/${KERNEL_RELEASE}" "${payload_dir}/lib/modules/"
+
+  cat <<EOF2 > "${bundle_dir}/manifest.txt"
+Orange Pi Zero 2 kernel update bundle
+
+Kernel release: ${KERNEL_RELEASE}
+Kernel image:   /boot/${ASSET_KERNEL_NAME}
+Initrd image:   /boot/${ASSET_INITRD_NAME}
+Device tree:    /boot/dtb/sun50i-h616-orangepi-zero2.dtb
+Modules:        /lib/modules/${KERNEL_RELEASE}
+
+Install:
+  sudo ./install.sh
+  sudo reboot
+EOF2
+
+  {
+    cat <<EOF2
+#!/usr/bin/env bash
+set -euo pipefail
+
+KERNEL_RELEASE="${KERNEL_RELEASE}"
+KERNEL_IMAGE="${ASSET_KERNEL_NAME}"
+INITRD_IMAGE="${ASSET_INITRD_NAME}"
+DTB_IMAGE="sun50i-h616-orangepi-zero2.dtb"
+EOF2
+    cat <<'SCRIPT'
+
+SCRIPT_NAME=$(basename "$0")
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+PAYLOAD_DIR="${SCRIPT_DIR}/payload"
+BACKUP_ID=$(date +%Y%m%d-%H%M%S)
+BACKUP_DIR="/var/backups/orangepi-kernel/${BACKUP_ID}"
+
+log() {
+  echo "[${SCRIPT_NAME}] $*"
+}
+
+require_root() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "请使用 root 权限运行: sudo ./install.sh"
+    exit 1
+  fi
+}
+
+ensure_payload() {
+  local missing=()
+  local paths=(
+    "${PAYLOAD_DIR}/boot/${KERNEL_IMAGE}"
+    "${PAYLOAD_DIR}/boot/${INITRD_IMAGE}"
+    "${PAYLOAD_DIR}/boot/config-${KERNEL_RELEASE}"
+    "${PAYLOAD_DIR}/boot/dtb/${DTB_IMAGE}"
+    "${PAYLOAD_DIR}/lib/modules/${KERNEL_RELEASE}"
+  )
+
+  for path in "${paths[@]}"; do
+    if [[ ! -e "${path}" ]]; then
+      missing+=("${path}")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -ne 0 ]]; then
+    echo "更新包不完整，缺少:"
+    printf '  %s\n' "${missing[@]}"
+    exit 1
+  fi
+}
+
+ensure_boot_mounted() {
+  if mountpoint -q /boot; then
+    return
+  fi
+
+  log "/boot 未挂载，尝试挂载"
+  mount /boot
+}
+
+backup_file() {
+  local src="$1"
+  local dst="${BACKUP_DIR}${src}"
+
+  if [[ ! -e "${src}" ]]; then
+    return
+  fi
+
+  mkdir -p "$(dirname "${dst}")"
+  cp -a "${src}" "${dst}"
+}
+
+backup_current_boot() {
+  log "备份当前启动文件到 ${BACKUP_DIR}"
+  mkdir -p "${BACKUP_DIR}"
+
+  backup_file /boot/Image
+  backup_file "/boot/${INITRD_IMAGE}"
+  backup_file "/boot/config-${KERNEL_RELEASE}"
+  backup_file "/boot/dtb/${DTB_IMAGE}"
+  backup_file /boot/extlinux/extlinux.conf
+}
+
+archive_file() {
+  local src="$1"
+  local dst="${BACKUP_DIR}${src}"
+
+  if [[ ! -e "${src}" ]]; then
+    return
+  fi
+
+  mkdir -p "$(dirname "${dst}")"
+  mv "${src}" "${dst}"
+}
+
+archive_old_boot_versions() {
+  local path
+
+  for path in /boot/initrd.img-* /boot/config-*; do
+    [[ -e "${path}" ]] || continue
+    case "${path}" in
+      "/boot/${INITRD_IMAGE}"|"/boot/config-${KERNEL_RELEASE}")
+        continue
+        ;;
+    esac
+
+    log "移动旧启动文件到备份: ${path}"
+    archive_file "${path}"
+  done
+}
+
+install_modules() {
+  local src="${PAYLOAD_DIR}/lib/modules/${KERNEL_RELEASE}"
+  local dst="/lib/modules/${KERNEL_RELEASE}"
+
+  mkdir -p /lib/modules
+
+  if [[ -e "${dst}" ]]; then
+    log "备份同版本模块目录"
+    mkdir -p "${BACKUP_DIR}/lib/modules"
+    cp -a "${dst}" "${BACKUP_DIR}/lib/modules/${KERNEL_RELEASE}"
+    rm -rf "${dst}"
+  fi
+
+  log "安装内核模块 ${KERNEL_RELEASE}"
+  cp -a "${src}" /lib/modules/
+
+  if command -v depmod >/dev/null 2>&1; then
+    depmod -a "${KERNEL_RELEASE}"
+  fi
+}
+
+install_boot_files() {
+  log "安装启动文件"
+  mkdir -p /boot/dtb
+
+  install -m 0644 "${PAYLOAD_DIR}/boot/${KERNEL_IMAGE}" "/boot/${KERNEL_IMAGE}"
+  install -m 0644 "${PAYLOAD_DIR}/boot/${INITRD_IMAGE}" "/boot/${INITRD_IMAGE}"
+  install -m 0644 "${PAYLOAD_DIR}/boot/config-${KERNEL_RELEASE}" "/boot/config-${KERNEL_RELEASE}"
+  install -m 0644 "${PAYLOAD_DIR}/boot/dtb/${DTB_IMAGE}" "/boot/dtb/${DTB_IMAGE}"
+}
+
+update_extlinux() {
+  local conf="/boot/extlinux/extlinux.conf"
+  local tmp="${conf}.tmp"
+  local target_label=""
+
+  mkdir -p /boot/extlinux
+  if [[ ! -f "${conf}" ]]; then
+    log "未找到 extlinux.conf，创建默认配置"
+    cat > "${conf}" <<EOF2
+LABEL DebianTrixie
+  LINUX /${KERNEL_IMAGE}
+  INITRD /${INITRD_IMAGE}
+  FDT /dtb/${DTB_IMAGE}
+  APPEND root=/dev/mmcblk0p2 rootfstype=btrfs rootflags=subvol=@,compress=zstd rootwait rw console=ttyS0,115200 console=tty1
+EOF2
+    return
+  fi
+
+  if grep -Eq "^LABEL[[:space:]]+DebianTrixie[[:space:]]*$" "${conf}"; then
+    target_label="DebianTrixie"
+  fi
+
+  awk -v target_label="${target_label}" -v kernel="/${KERNEL_IMAGE}" -v initrd="/${INITRD_IMAGE}" -v dtb="/dtb/${DTB_IMAGE}" '
+    function flush_target() {
+      if (!in_target) {
+        return
+      }
+      if (!saw_initrd) {
+        print "  INITRD " initrd
+      }
+      if (!saw_fdt) {
+        print "  FDT " dtb
+      }
+      in_target = 0
+    }
+    $1 == "LABEL" {
+      flush_target()
+      if (!updated && ((target_label != "" && $2 == target_label) || (target_label == "" && !seen_label))) {
+        in_target = 1
+        updated = 1
+        saw_initrd = 0
+        saw_fdt = 0
+      }
+      seen_label = 1
+      print
+      next
+    }
+    in_target && /^[[:space:]]*LINUX[[:space:]]/ {
+      print "  LINUX " kernel
+      next
+    }
+    in_target && /^[[:space:]]*INITRD[[:space:]]/ {
+      print "  INITRD " initrd
+      saw_initrd = 1
+      next
+    }
+    in_target && /^[[:space:]]*FDT[[:space:]]/ {
+      print "  FDT " dtb
+      saw_fdt = 1
+      next
+    }
+    in_target && /^[[:space:]]*APPEND[[:space:]]/ {
+      if (!saw_initrd) {
+        print "  INITRD " initrd
+        saw_initrd = 1
+      }
+      if (!saw_fdt) {
+        print "  FDT " dtb
+        saw_fdt = 1
+      }
+      print
+      next
+    }
+    { print }
+    END {
+      flush_target()
+    }
+  ' "${conf}" > "${tmp}"
+  cat "${tmp}" > "${conf}"
+  rm -f "${tmp}"
+}
+
+main() {
+  require_root
+  ensure_payload
+  ensure_boot_mounted
+  backup_current_boot
+  install_modules
+  install_boot_files
+  update_extlinux
+  archive_old_boot_versions
+  sync
+
+  log "更新完成: ${KERNEL_RELEASE}"
+  log "请重启系统: reboot"
+}
+
+main "$@"
+SCRIPT
+  } > "${bundle_dir}/install.sh"
+  chmod +x "${bundle_dir}/install.sh"
+
+  tar -C "${WORKDIR_CREATED}" -cJf "${UPDATE_BUNDLE_OUTPUT}" "${bundle_name}"
+  log "内核更新包: ${UPDATE_BUNDLE_OUTPUT}"
 }
 
 install_uboot_to_output_image() {
@@ -1148,11 +1492,12 @@ print_flash_hint() {
   local out_file="${OUTPUT}"
   if [[ "${COMPRESS}" == "xz" ]]; then
     out_file="${OUTPUT}.xz"
-    echo "镜像生成完成: ${out_file}"
-    return
   fi
 
   echo "镜像生成完成: ${out_file}"
+  if [[ -n "${UPDATE_BUNDLE_OUTPUT}" ]]; then
+    echo "内核更新包生成完成: ${UPDATE_BUNDLE_OUTPUT}"
+  fi
 }
 
 main() {
@@ -1174,6 +1519,7 @@ main() {
   configure_rootfs_in_chroot
   install_compiled_kernel
   install_boot_assets
+  create_update_bundle
   install_uboot_to_output_image
   finalize_image
   compress_output
