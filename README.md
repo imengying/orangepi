@@ -56,7 +56,7 @@ cd orangepi
 
 # 安装必要依赖 (仅供参考，具体视环境而定)
 sudo apt update && sudo apt install -y \
-  debootstrap qemu-user-static parted util-linux dosfstools btrfs-progs \
+  debootstrap debian-archive-keyring qemu-user-static parted util-linux dosfstools btrfs-progs \
   rsync tar xz-utils git make gcc-aarch64-linux-gnu bc bison flex openssl \
   libssl-dev device-tree-compiler swig python3
 
@@ -78,6 +78,7 @@ sudo ./build.sh
 | `--mirror` | Apt 镜像源地址 | `http://mirrors.ustc.edu.cn/debian` |
 | `--compress` | 压缩输出 (`xz` 或 `none`) | `xz` |
 | `--update-bundle` | 是否生成已安装系统内核更新包 (`auto`/`yes`/`no`) | `auto` |
+| `--debootstrap-keyring` | debootstrap 验签使用的 Debian archive keyring | `/usr/share/keyrings/debian-archive-keyring.gpg` |
 | `--kernel-ref` | Linux 内核分支/标签 | `6.12` |
 | `--root-pass` | Root 用户密码 | `orangepi` |
 

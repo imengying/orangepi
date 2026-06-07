@@ -11,6 +11,7 @@ MIRROR="${MIRROR:-http://mirrors.ustc.edu.cn/debian}"
 OUTPUT="${OUTPUT:-$(pwd)/orangepi-zero2-debian13-trixie-btrfs.img}"
 COMPRESS="${COMPRESS:-xz}"
 UPDATE_BUNDLE="${UPDATE_BUNDLE:-auto}"
+DEBOOTSTRAP_KEYRING="${DEBOOTSTRAP_KEYRING:-/usr/share/keyrings/debian-archive-keyring.gpg}"
 WORKDIR="${WORKDIR:-}"
 ROOT_PASS="${ROOT_PASS:-orangepi}"
 
@@ -98,6 +99,12 @@ check_deps() {
     echo "请先安装依赖后重试（可参考 .github/workflows/build-release.yml 的 Install dependencies 步骤）"
     exit 1
   fi
+
+  if [[ ! -f "${DEBOOTSTRAP_KEYRING}" ]]; then
+    echo "缺少 Debian archive keyring: ${DEBOOTSTRAP_KEYRING}"
+    echo "请安装 debian-archive-keyring 后重试。"
+    exit 1
+  fi
 }
 
 ensure_loop_support() {
@@ -144,6 +151,10 @@ parse_args() {
         ;;
       --update-bundle)
         UPDATE_BUNDLE="$2"
+        shift 2
+        ;;
+      --debootstrap-keyring)
+        DEBOOTSTRAP_KEYRING="$2"
         shift 2
         ;;
       --workdir)
@@ -213,6 +224,11 @@ validate_args() {
       exit 1
       ;;
   esac
+
+  if [[ -z "${DEBOOTSTRAP_KEYRING}" ]]; then
+    echo "无效参数: --debootstrap-keyring 不能为空"
+    exit 1
+  fi
 
   if [[ "${ARCH}" != "arm64" ]]; then
     echo "当前脚本仅支持 --arch arm64"
@@ -694,7 +710,9 @@ EOF2
 
 build_debian_rootfs() {
   log "debootstrap 构建 rootfs"
-  debootstrap --arch="${ARCH}" "${SUITE}" "${MNT_ROOT}" "${MIRROR}"
+  debootstrap --keyring="${DEBOOTSTRAP_KEYRING}" --arch="${ARCH}" "${SUITE}" "${MNT_ROOT}" "${MIRROR}"
+  mkdir -p "${MNT_ROOT}/usr/share/keyrings"
+  cp "${DEBOOTSTRAP_KEYRING}" "${MNT_ROOT}/usr/share/keyrings/debian-archive-keyring.gpg"
   cp "$(command -v qemu-aarch64-static)" "${MNT_ROOT}/usr/bin/"
   mount --bind /dev "${MNT_ROOT}/dev"
   mkdir -p "${MNT_ROOT}/dev/pts"
@@ -857,7 +875,7 @@ deb ${MIRROR} ${SUITE}-updates main contrib non-free non-free-firmware
 EOF2
 
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
-  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils zstd locales"
+  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends debian-archive-keyring openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils zstd locales"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
   
   # 确保 NetworkManager 管理所有网络接口
