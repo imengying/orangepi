@@ -875,7 +875,7 @@ deb ${MIRROR} ${SUITE}-updates main contrib non-free non-free-firmware
 EOF2
 
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
-  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends debian-archive-keyring openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils zstd locales"
+  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends debian-archive-keyring openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils zstd xz-utils locales"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
   
   # 确保 NetworkManager 管理所有网络接口
@@ -983,6 +983,61 @@ EOF2
 /dev/mmcblk0p2 / btrfs defaults,compress=zstd,subvol=${BTRFS_ROOT_SUBVOL} 0 1
 /dev/mmcblk0p1 /boot vfat defaults 0 2
 EOF2
+
+  cat <<'EOF2' > "${MNT_ROOT}/root/cleanup-kernel-backups.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+CURRENT_KERNEL=$(uname -r)
+REMOVE_BACKUP_ARCHIVES="${1:-yes}"
+
+case "${REMOVE_BACKUP_ARCHIVES}" in
+  yes|no)
+    ;;
+  *)
+    echo "用法: $0 [yes|no]"
+    echo "默认 yes：同时清理 /root/orangepi-kernel-backup-*.tar.xz"
+    echo "传 no：只清理旧内核模块和旧 /boot 版本文件"
+    exit 1
+    ;;
+esac
+
+echo "当前运行内核: ${CURRENT_KERNEL}"
+
+for module_dir in /lib/modules/*; do
+  [[ -d "${module_dir}" ]] || continue
+  if [[ "$(basename "${module_dir}")" == "${CURRENT_KERNEL}" ]]; then
+    continue
+  fi
+
+  echo "删除旧模块目录: ${module_dir}"
+  rm -rf -- "${module_dir}"
+done
+
+for boot_file in /boot/initrd.img-* /boot/config-*; do
+  [[ -e "${boot_file}" ]] || continue
+  case "${boot_file}" in
+    "/boot/initrd.img-${CURRENT_KERNEL}"|"/boot/config-${CURRENT_KERNEL}")
+      continue
+      ;;
+  esac
+
+  echo "删除旧启动文件: ${boot_file}"
+  rm -f -- "${boot_file}"
+done
+
+if [[ "${REMOVE_BACKUP_ARCHIVES}" == "yes" ]]; then
+  for backup in /root/orangepi-kernel-backup-*.tar.xz; do
+    [[ -e "${backup}" ]] || continue
+    echo "删除旧备份包: ${backup}"
+    rm -f -- "${backup}"
+  done
+fi
+
+depmod -a "${CURRENT_KERNEL}" 2>/dev/null || true
+echo "清理完成"
+EOF2
+  chmod +x "${MNT_ROOT}/root/cleanup-kernel-backups.sh"
 
   write_resize_script
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable opi-firstboot-resize.service"
@@ -1224,7 +1279,9 @@ SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PAYLOAD_DIR="${SCRIPT_DIR}/payload"
 BACKUP_ID=$(date +%Y%m%d-%H%M%S)
-BACKUP_DIR="/var/backups/orangepi-kernel/${BACKUP_ID}"
+BACKUP_PARENT="/tmp/orangepi-kernel-backup"
+BACKUP_DIR="${BACKUP_PARENT}/${BACKUP_ID}"
+BACKUP_ARCHIVE="/root/orangepi-kernel-backup-${BACKUP_ID}.tar.xz"
 
 log() {
   echo "[${SCRIPT_NAME}] $*"
@@ -1282,7 +1339,7 @@ backup_file() {
 }
 
 backup_current_boot() {
-  log "备份当前启动文件到 ${BACKUP_DIR}"
+  log "备份当前启动文件到临时目录 ${BACKUP_DIR}"
   mkdir -p "${BACKUP_DIR}"
 
   backup_file /boot/Image
@@ -1433,6 +1490,80 @@ EOF2
   rm -f "${tmp}"
 }
 
+install_cleanup_script() {
+  log "安装备份清理脚本"
+  cat > /root/cleanup-kernel-backups.sh <<'EOF2'
+#!/usr/bin/env bash
+set -euo pipefail
+
+CURRENT_KERNEL=$(uname -r)
+REMOVE_BACKUP_ARCHIVES="${1:-yes}"
+
+case "${REMOVE_BACKUP_ARCHIVES}" in
+  yes|no)
+    ;;
+  *)
+    echo "用法: $0 [yes|no]"
+    echo "默认 yes：同时清理 /root/orangepi-kernel-backup-*.tar.xz"
+    echo "传 no：只清理旧内核模块和旧 /boot 版本文件"
+    exit 1
+    ;;
+esac
+
+echo "当前运行内核: ${CURRENT_KERNEL}"
+
+for module_dir in /lib/modules/*; do
+  [[ -d "${module_dir}" ]] || continue
+  if [[ "$(basename "${module_dir}")" == "${CURRENT_KERNEL}" ]]; then
+    continue
+  fi
+
+  echo "删除旧模块目录: ${module_dir}"
+  rm -rf -- "${module_dir}"
+done
+
+for boot_file in /boot/initrd.img-* /boot/config-*; do
+  [[ -e "${boot_file}" ]] || continue
+  case "${boot_file}" in
+    "/boot/initrd.img-${CURRENT_KERNEL}"|"/boot/config-${CURRENT_KERNEL}")
+      continue
+      ;;
+  esac
+
+  echo "删除旧启动文件: ${boot_file}"
+  rm -f -- "${boot_file}"
+done
+
+if [[ "${REMOVE_BACKUP_ARCHIVES}" == "yes" ]]; then
+  for backup in /root/orangepi-kernel-backup-*.tar.xz; do
+    [[ -e "${backup}" ]] || continue
+    echo "删除旧备份包: ${backup}"
+    rm -f -- "${backup}"
+  done
+fi
+
+depmod -a "${CURRENT_KERNEL}" 2>/dev/null || true
+echo "清理完成"
+EOF2
+  chmod +x /root/cleanup-kernel-backups.sh
+}
+
+pack_backup_archive() {
+  if [[ ! -d "${BACKUP_DIR}" ]]; then
+    return
+  fi
+
+  if [[ -z "$(find "${BACKUP_DIR}" -mindepth 1 -print -quit)" ]]; then
+    rm -rf "${BACKUP_DIR}"
+    return
+  fi
+
+  log "打包旧版本备份到 ${BACKUP_ARCHIVE}"
+  tar -C "${BACKUP_PARENT}" -cJf "${BACKUP_ARCHIVE}" "${BACKUP_ID}"
+  rm -rf "${BACKUP_DIR}"
+  rmdir "${BACKUP_PARENT}" 2>/dev/null || true
+}
+
 main() {
   require_root
   ensure_payload
@@ -1442,9 +1573,14 @@ main() {
   install_boot_files
   update_extlinux
   archive_old_boot_versions
+  pack_backup_archive
+  install_cleanup_script
   sync
 
   log "更新完成: ${KERNEL_RELEASE}"
+  if [[ -f "${BACKUP_ARCHIVE}" ]]; then
+    log "旧版本备份: ${BACKUP_ARCHIVE}"
+  fi
   log "请重启系统: reboot"
 }
 

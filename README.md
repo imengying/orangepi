@@ -43,7 +43,9 @@ sudo ./install.sh
 sudo reboot
 ```
 
-更新包只替换 `/boot` 中的内核、initrd、设备树、内核配置以及 `/lib/modules/<版本>`，不会改写 U-Boot 或重新分区。安装脚本会把当前启动文件备份到 `/var/backups/orangepi-kernel/`。
+更新包只替换 `/boot` 中的内核、initrd、设备树、内核配置以及 `/lib/modules/<版本>`，不会改写 U-Boot 或重新分区。安装脚本会把旧版本备份打包到 `/root/orangepi-kernel-backup-*.tar.xz`。
+
+确认新内核正常启动后，可执行 `/root/cleanup-kernel-backups.sh` 清理旧版本。脚本只保留当前 `uname -r` 正在使用的内核模块和 `/boot` 版本文件，并默认删除 `/root/orangepi-kernel-backup-*.tar.xz` 备份包；如需保留备份包可执行 `/root/cleanup-kernel-backups.sh no`。
 
 ## 💻 本地构建 (可选)
 
