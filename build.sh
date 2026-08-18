@@ -472,6 +472,44 @@ build_uboot() {
   cp "${uboot_bin}" "${ASSETS_DIR}/uboot.bin"
 }
 
+patch_vendor_warning_sources() {
+  local addr_dir="${KERNEL_SRC_DIR}/drivers/misc/sunxi-addr"
+  local sid_file="${KERNEL_SRC_DIR}/drivers/nvmem/sunxi_sid.c"
+  local cmdevt_file="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622/unisocwifi/cmdevt.c"
+
+  # These exported helpers come from the vendor patches and need declarations
+  # before their definitions for the kernel's missing-prototypes warning.
+  if ! grep -Fq 'int hmac_sha256(const uint8_t *plaintext, ssize_t psize, uint8_t *output);' \
+    "${addr_dir}/sha256.c"; then
+    sed -i '/^int hmac_sha256(/i int hmac_sha256(const uint8_t *plaintext, ssize_t psize, uint8_t *output);' \
+      "${addr_dir}/sha256.c"
+  fi
+  if ! grep -Fq 'int get_custom_mac_address(int fmt, char *name, char *addr);' \
+    "${addr_dir}/sunxi-addr.c"; then
+    sed -i '/^int get_custom_mac_address(/i int get_custom_mac_address(int fmt, char *name, char *addr);' \
+      "${addr_dir}/sunxi-addr.c"
+  fi
+  if ! grep -Fq 'int sunxi_get_soc_chipid(unsigned char *chipid);' "${sid_file}"; then
+    sed -i '/^int sunxi_get_soc_chipid(unsigned char \*chipid)$/i int sunxi_get_soc_chipid(unsigned char *chipid);' "${sid_file}"
+  fi
+  if ! grep -Fq 'int sunxi_get_serial(unsigned char *serial);' "${sid_file}"; then
+    sed -i '/^int sunxi_get_soc_chipid(unsigned char \*chipid)$/i int sunxi_get_serial(unsigned char *serial);' "${sid_file}"
+  fi
+
+  # The response sizes are compile-time constants; fixed arrays avoid the
+  # vendor driver's -Wvla-larger-than warnings without changing its protocol.
+  sed -i \
+    -e '/u16 r_len = sizeof(\*fw_api);/{n;s/u8 r_buf\[r_len\];/u8 r_buf[sizeof(*fw_api)];/;}' \
+    -e '/u16 r_len = sizeof(\*p) + GET_INFO_TLV_RBUF_SIZE;/{n;n;s/u8 r_buf\[r_len\];/u8 r_buf[sizeof(*p) + GET_INFO_TLV_RBUF_SIZE];/;}' \
+    -e '/u16 r_len = sizeof(\*packet);/{n;s/u8 r_buf\[r_len\];/u8 r_buf[sizeof(*packet)];/;}' \
+    "${cmdevt_file}"
+
+  if grep -Fq 'u8 r_buf[r_len];' "${cmdevt_file}"; then
+    echo "UWE5622 cmdevt.c 可变长栈数组修补失败"
+    exit 1
+  fi
+}
+
 apply_kernel_patches() {
   local patch_file
   local wireless_dir="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622"
@@ -517,6 +555,8 @@ apply_kernel_patches() {
     printf '%s\n' 'obj-$(CONFIG_SPARD_WLAN_SUPPORT) += uwe5622/' >> \
       "${KERNEL_SRC_DIR}/drivers/net/wireless/Makefile"
   fi
+
+  patch_vendor_warning_sources
 }
 
 assert_kernel_config() {
@@ -979,7 +1019,7 @@ EOF2
   log "禁用不必要的服务"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl mask getty@tty1.service" || true
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable apt-daily.timer apt-daily-upgrade.timer" || true
-  chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable man-db.timer" || true
+  chroot "${MNT_ROOT}" /bin/bash -c "if systemctl cat man-db.timer >/dev/null 2>&1; then systemctl disable man-db.timer; fi" || true
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable e2scrub_all.timer" || true
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable fstrim.timer" || true
   
