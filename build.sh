@@ -16,14 +16,19 @@ WORKDIR="${WORKDIR:-}"
 ROOT_PASS="${ROOT_PASS:-orangepi}"
 
 KERNEL_REPO="${KERNEL_REPO:-https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git}"
-KERNEL_REF="${KERNEL_REF:-6.12}"
+KERNEL_REF="${KERNEL_REF:-7.1}"
 KERNEL_DEFCONFIG="${KERNEL_DEFCONFIG:-defconfig}"
 UBOOT_REPO="${UBOOT_REPO:-https://github.com/u-boot/u-boot.git}"
 UBOOT_REF="${UBOOT_REF:-v2025.01}"
 ATF_REPO="${ATF_REPO:-https://github.com/ARM-software/arm-trusted-firmware.git}"
 ATF_REF="${ATF_REF:-v2.12.0}"
+UWE5622_REPO="${UWE5622_REPO:-https://github.com/armbian/uwe5622.git}"
+UWE5622_REF="${UWE5622_REF:-d6bec7538a0b4b67e35715ad71eaa056555524cb}"
 JOBS="${JOBS:-$(nproc)}"
 BTRFS_ROOT_SUBVOL="${BTRFS_ROOT_SUBVOL:-@}"
+
+ARMBIAN_BUILD_COMMIT="fd4ebfd1e107d5b89f7a672c7d609789565753b2"
+ARMBIAN_FIRMWARE_COMMIT="f50a2a21bcdb77a562b3976930c5c6b521a1df08"
 
 LOOP_OUTPUT=""
 WORKDIR_CREATED=""
@@ -34,6 +39,9 @@ SRC_DIR=""
 KERNEL_SRC_DIR=""
 UBOOT_SRC_DIR=""
 ATF_SRC_DIR=""
+UWE5622_SRC_DIR=""
+VENDOR_INPUTS_DIR=""
+FIRMWARE_ASSETS_DIR=""
 ATF_BL31=""
 KERNEL_RELEASE=""
 ASSET_KERNEL_NAME="Image"
@@ -85,6 +93,7 @@ check_deps() {
   local deps=(
     debootstrap qemu-aarch64-static parted losetup mkfs.vfat mkfs.btrfs btrfs mount mountpoint
     rsync tar xz chroot lsblk git make aarch64-linux-gnu-gcc bc bison flex openssl dtc swig python3
+    curl sha256sum
   )
   local missing=()
 
@@ -251,14 +260,14 @@ resolve_kernel_ref() {
   local major=""
   local minor=""
 
-  # 支持 --kernel-ref 6.12.69（自动补 v 前缀）
+  # 支持 --kernel-ref 7.1.8（自动补 v 前缀）
   if [[ "${ref}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
     KERNEL_REF="v${ref}"
     log "内核版本: ${KERNEL_REF}"
     return
   fi
 
-  # 支持 --kernel-ref 6.12 / v6.12（自动解析最新补丁版）
+  # 支持 --kernel-ref 7.1 / v7.1（自动解析最新补丁版）
   if [[ "${ref}" =~ ^v?([0-9]+)\.([0-9]+)$ ]]; then
     major="${BASH_REMATCH[1]}"
     minor="${BASH_REMATCH[2]}"
@@ -309,11 +318,71 @@ init_workdir() {
   KERNEL_SRC_DIR="${SRC_DIR}/linux"
   UBOOT_SRC_DIR="${SRC_DIR}/u-boot"
   ATF_SRC_DIR="${SRC_DIR}/arm-trusted-firmware"
+  UWE5622_SRC_DIR="${SRC_DIR}/uwe5622"
+  VENDOR_INPUTS_DIR="${SRC_DIR}/vendor-inputs"
+  FIRMWARE_ASSETS_DIR="${ASSETS_DIR}/firmware/uwe5622"
   MNT_ROOT="${WORKDIR_CREATED}/rootfs"
   MNT_BOOT="${WORKDIR_CREATED}/rootfs/boot"
 
-  mkdir -p "${ASSETS_DIR}/dtb" "${SRC_DIR}" "${MNT_ROOT}"
+  mkdir -p "${ASSETS_DIR}/dtb" "${SRC_DIR}" "${VENDOR_INPUTS_DIR}" \
+    "${FIRMWARE_ASSETS_DIR}" "${MNT_ROOT}"
   log "工作目录: ${WORKDIR_CREATED}"
+}
+
+fetch_verified_file() {
+  local url="$1"
+  local expected_sha256="$2"
+  local destination="$3"
+  local actual_sha256
+
+  curl -fL --retry 3 --retry-delay 2 "${url}" -o "${destination}"
+  actual_sha256=$(sha256sum "${destination}")
+  actual_sha256="${actual_sha256%% *}"
+  if [[ "${actual_sha256}" != "${expected_sha256}" ]]; then
+    echo "下载文件校验失败: ${url}"
+    echo "期望 SHA256: ${expected_sha256}"
+    echo "实际 SHA256: ${actual_sha256}"
+    exit 1
+  fi
+}
+
+fetch_armbian_inputs() {
+  local patch_base="https://raw.githubusercontent.com/armbian/build/${ARMBIAN_BUILD_COMMIT}/patch/kernel/archive/sunxi-7.1/patches.armbian"
+  local firmware_base="https://raw.githubusercontent.com/armbian/firmware/${ARMBIAN_FIRMWARE_COMMIT}/uwe5622"
+
+  log "获取并校验 Armbian 7.1 板级补丁"
+  fetch_verified_file "${patch_base}/arm64-dts-sun50i-h616-orangepi-zero2-enable-usb1-vbus.patch" \
+    "6ed73c3d69c43e3c7d8fe9f4601f8a5418a0dfd17ad376bc72edb6428ed95eb9" \
+    "${VENDOR_INPUTS_DIR}/01-enable-usb1-vbus.patch"
+  fetch_verified_file "${patch_base}/arm64-dts-sun50i-h616-orangepi-zero2-fix-led-functions.patch" \
+    "a40156ed2247b7a0ebc4410f6c749884da789e675121467fba1a044447a33bc5" \
+    "${VENDOR_INPUTS_DIR}/02-fix-led-functions.patch"
+  fetch_verified_file "${patch_base}/arm64-dts-sun50i-h616-orangepi-zero2-zero3-add-wifi.patch" \
+    "cb868019ea15201922df7fd9869059a4f04f5aaf8d3fd61d267fe7939d0b6355" \
+    "${VENDOR_INPUTS_DIR}/03-add-wifi.patch"
+  fetch_verified_file "${patch_base}/arm64-dts-sun50i-h6-h616-add-sunxi-info-nodes.patch" \
+    "5abc775c41de738382a6214d77ccb274d730f1611a43a3a99b033aff9f181422" \
+    "${VENDOR_INPUTS_DIR}/04-add-sunxi-info-nodes.patch"
+  fetch_verified_file "${patch_base}/drv-nvmem-sunxi-add-chipid-serial-helpers.patch" \
+    "e7ad23a9b5331d0f132a152f49db008c6cb95da30c33990b13ee54b2c1e88c5b" \
+    "${VENDOR_INPUTS_DIR}/05-add-sunxi-chipid-helpers.patch"
+  fetch_verified_file "${patch_base}/drv-nvmem-sunxi-add-h616-support.patch" \
+    "a2ae77146f78c43cc5727b2cdf428ab9703789abd11e2383e5f55ea290958ad4" \
+    "${VENDOR_INPUTS_DIR}/06-add-h616-sid-support.patch"
+  fetch_verified_file "${patch_base}/drv-misc-sunxi-add-addr-mgt-driver-uwe5622.patch" \
+    "ee2cf5a3cb252600d4cef4d6554a08606765c334476622315b82ca4d13671d50" \
+    "${VENDOR_INPUTS_DIR}/07-add-sunxi-addr-driver.patch"
+
+  log "获取并校验 UWE5622 固件"
+  fetch_verified_file "${firmware_base}/wcnmodem.bin" \
+    "119b87ce30875734a67462f7293fb8fe85acf3270fe8b78c978ae24be7715a80" \
+    "${FIRMWARE_ASSETS_DIR}/wcnmodem.bin"
+  fetch_verified_file "${firmware_base}/wcnmodem-38222.bin" \
+    "8a49a087bc26a95f89f3df9d9f5780ab3463fbdfc6b71d3892e7bae8f2999260" \
+    "${FIRMWARE_ASSETS_DIR}/wcnmodem-38222.bin"
+  fetch_verified_file "${firmware_base}/wifi_2355b001_1ant.ini" \
+    "1f3c40ec245a8d0b99ad1c23706597d6dd5008ab80cefb7bcc1956efc4e938f7" \
+    "${FIRMWARE_ASSETS_DIR}/wifi_2355b001_1ant.ini"
 }
 
 clone_repo() {
@@ -363,6 +432,8 @@ fetch_sources() {
   clone_repo "${ATF_REPO}" "${ATF_REF}" "${ATF_SRC_DIR}"
   clone_repo "${UBOOT_REPO}" "${UBOOT_REF}" "${UBOOT_SRC_DIR}"
   clone_repo "${KERNEL_REPO}" "${KERNEL_REF}" "${KERNEL_SRC_DIR}"
+  clone_repo "${UWE5622_REPO}" "${UWE5622_REF}" "${UWE5622_SRC_DIR}"
+  fetch_armbian_inputs
 }
 
 build_atf() {
@@ -401,117 +472,88 @@ build_uboot() {
   cp "${uboot_bin}" "${ASSETS_DIR}/uboot.bin"
 }
 
-set_dtb_led_defaults() {
-  local dts_file="${KERNEL_SRC_DIR}/arch/arm64/boot/dts/allwinner/sun50i-h616-orangepi-zero.dtsi"
-  if [[ ! -f "${dts_file}" ]]; then
-    echo "未找到内核 LED 设备树文件: ${dts_file}"
-    exit 1
+apply_kernel_patches() {
+  local patch_file
+  local wireless_dir="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622"
+
+  log "应用 Armbian Zero 2 7.1 板级补丁"
+  for patch_file in \
+    01-enable-usb1-vbus.patch \
+    02-fix-led-functions.patch \
+    03-add-wifi.patch \
+    04-add-sunxi-info-nodes.patch \
+    05-add-sunxi-chipid-helpers.patch \
+    06-add-h616-sid-support.patch; do
+    git -C "${KERNEL_SRC_DIR}" apply --check --whitespace=nowarn "${VENDOR_INPUTS_DIR}/${patch_file}"
+    git -C "${KERNEL_SRC_DIR}" apply --whitespace=nowarn "${VENDOR_INPUTS_DIR}/${patch_file}"
+  done
+
+  # The upstream patch only conflicts with the moving parent Makefile hunk.
+  git -C "${KERNEL_SRC_DIR}" apply --check --whitespace=nowarn \
+    --exclude=drivers/misc/Makefile "${VENDOR_INPUTS_DIR}/07-add-sunxi-addr-driver.patch"
+  git -C "${KERNEL_SRC_DIR}" apply --whitespace=nowarn \
+    --exclude=drivers/misc/Makefile "${VENDOR_INPUTS_DIR}/07-add-sunxi-addr-driver.patch"
+  if ! grep -Fq 'obj-$(CONFIG_SUNXI_ADDR_MGT) += sunxi-addr/' "${KERNEL_SRC_DIR}/drivers/misc/Makefile"; then
+    printf '%s\n' 'obj-$(CONFIG_SUNXI_ADDR_MGT) += sunxi-addr/' >> "${KERNEL_SRC_DIR}/drivers/misc/Makefile"
   fi
 
-  log "修改内核设备树 LED 默认状态（红灯关闭，绿灯心跳）"
-  python3 - "${dts_file}" <<'PY'
-import re
-import sys
+  if [[ ! -d "${UWE5622_SRC_DIR}/unisocwcn" || ! -d "${UWE5622_SRC_DIR}/unisocwifi" ]]; then
+    echo "UWE5622 源码不完整: ${UWE5622_SRC_DIR}"
+    exit 1
+  fi
+  rm -rf "${wireless_dir}"
+  mkdir -p "${wireless_dir}"
+  cp -a "${UWE5622_SRC_DIR}/tty-sdio" "${UWE5622_SRC_DIR}/unisocwcn" \
+    "${UWE5622_SRC_DIR}/unisocwifi" "${UWE5622_SRC_DIR}/Kconfig" \
+    "${UWE5622_SRC_DIR}/Makefile" "${wireless_dir}/"
 
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    lines = f.readlines()
+  if ! grep -Fq 'source "drivers/net/wireless/uwe5622/Kconfig"' \
+    "${KERNEL_SRC_DIR}/drivers/net/wireless/Kconfig"; then
+    sed -i '/source "drivers\/net\/wireless\/ti\/Kconfig"/a source "drivers/net/wireless/uwe5622/Kconfig"' \
+      "${KERNEL_SRC_DIR}/drivers/net/wireless/Kconfig"
+  fi
+  if ! grep -Fq 'obj-$(CONFIG_SPARD_WLAN_SUPPORT) += uwe5622/' \
+    "${KERNEL_SRC_DIR}/drivers/net/wireless/Makefile"; then
+    printf '%s\n' 'obj-$(CONFIG_SPARD_WLAN_SUPPORT) += uwe5622/' >> \
+      "${KERNEL_SRC_DIR}/drivers/net/wireless/Makefile"
+  fi
+}
 
+assert_kernel_config() {
+  local expected
+  local missing=()
 
-def find_anchor(tokens):
-    for i, line in enumerate(lines):
-        for token in tokens:
-            if token in line:
-                return i
-    return -1
+  for expected in \
+    CONFIG_WLAN=y \
+    CONFIG_CFG80211=m \
+    CONFIG_MAC80211=m \
+    CONFIG_RFKILL=y \
+    CONFIG_NVMEM_SUNXI_SID=y \
+    CONFIG_SPARD_WLAN_SUPPORT=y \
+    CONFIG_AW_WIFI_DEVICE_UWE5622=y \
+    CONFIG_AW_BIND_VERIFY=y \
+    CONFIG_WLAN_UWE5622=m \
+    CONFIG_SPRDWL_NG=m \
+    CONFIG_UNISOC_WIFI_PS=y \
+    CONFIG_TTY_OVERY_SDIO=m \
+    CONFIG_SUNXI_ADDR_MGT=m; do
+    if ! grep -qx "${expected}" "${KERNEL_SRC_DIR}/.config"; then
+      missing+=("${expected}")
+    fi
+  done
 
-
-def find_block_bounds(anchor_idx):
-    start = -1
-    for i in range(anchor_idx, -1, -1):
-        if "{" in lines[i]:
-            start = i
-            break
-    if start < 0:
-        raise RuntimeError("无法定位 LED 节点开始位置")
-
-    depth = 0
-    for i in range(start, len(lines)):
-        depth += lines[i].count("{")
-        depth -= lines[i].count("}")
-        if depth == 0:
-            return start, i
-    raise RuntimeError("无法定位 LED 节点结束位置")
-
-
-def patch_node(tokens, trigger, state):
-    anchor_idx = find_anchor(tokens)
-    if anchor_idx < 0:
-        return False
-
-    start, end = find_block_bounds(anchor_idx)
-    block = lines[start:end + 1]
-
-    indent = None
-    for line in block:
-        if "label =" in line or "function =" in line:
-            indent = re.match(r"^(\s*)", line).group(1)
-            break
-    if indent is None:
-        indent = re.match(r"^(\s*)", block[0]).group(1) + "\t"
-
-    new_block = []
-    for line in block[:-1]:
-        if re.search(r"\blinux,default-trigger\s*=", line):
-            continue
-        if re.search(r"\bdefault-state\s*=", line):
-            continue
-        new_block.append(line)
-
-    new_block.append(f'{indent}linux,default-trigger = "{trigger}";\n')
-    if state is not None:
-        new_block.append(f'{indent}default-state = "{state}";\n')
-    new_block.append(block[-1])
-
-    lines[start:end + 1] = new_block
-    return True
-
-
-red_ok = patch_node([
-    'label = "orangepi:red:power"',
-    'label = "red:power"',
-    "LED_FUNCTION_POWER",
-    'function = "power"',
-    "LED_COLOR_ID_RED",
-], "none", "off")
-green_ok = patch_node([
-    'label = "orangepi:green:status"',
-    'label = "green:status"',
-    "LED_FUNCTION_STATUS",
-    'function = "status"',
-    "LED_COLOR_ID_GREEN",
-], "heartbeat", None)
-
-if not red_ok or not green_ok:
-    missing = []
-    if not red_ok:
-        missing.append("red:power")
-    if not green_ok:
-        missing.append("green:status")
-    print("WARN: 未在内核 DTS 中定位到 LED 节点: " + ", ".join(missing), file=sys.stderr)
-
-with open(path, "w", encoding="utf-8") as f:
-    f.writelines(lines)
-
-print(f"Patched Kernel DTS: {path}")
-PY
+  if [[ "${#missing[@]}" -ne 0 ]]; then
+    echo "内核无线配置校验失败:"
+    printf '  %s\n' "${missing[@]}"
+    exit 1
+  fi
 }
 
 build_kernel() {
   log "编译 Linux 内核"
   make -C "${KERNEL_SRC_DIR}" mrproper
-  set_dtb_led_defaults
-  # 设备树补丁会让源码树变为 dirty；写入空 .scmversion 避免版本名追加 -dirty
+  apply_kernel_patches
+  # 内核补丁会让源码树变为 dirty；写入空 .scmversion 避免版本名追加 -dirty
   : > "${KERNEL_SRC_DIR}/.scmversion"
   if make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- "${KERNEL_DEFCONFIG}" >/dev/null 2>&1; then
     log "使用内核配置: ${KERNEL_DEFCONFIG}"
@@ -549,10 +591,19 @@ build_kernel() {
       --disable USB_XHCI_TEGRA \
       --enable EXTCON \
       --enable EXTCON_USB_GPIO \
-      --disable WLAN \
-      --disable CFG80211 \
-      --disable MAC80211 \
-      --disable WIRELESS \
+      --enable WLAN \
+      --module CFG80211 \
+      --enable CFG80211_WEXT \
+      --module MAC80211 \
+      --enable RFKILL \
+      --enable NVMEM \
+      --enable NVMEM_SUNXI_SID \
+      --enable SPARD_WLAN_SUPPORT \
+      --module WLAN_UWE5622 \
+      --module SPRDWL_NG \
+      --enable UNISOC_WIFI_PS \
+      --module TTY_OVERY_SDIO \
+      --module SUNXI_ADDR_MGT \
       --disable RTL8XXXU \
       --disable RTW88 \
       --disable RTW88_8822B \
@@ -621,6 +672,7 @@ build_kernel() {
   fi
 
   make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+  assert_kernel_config
 
   # 再次校验，确保不会带上 -dirty 后缀
   if grep -q '^CONFIG_LOCALVERSION_AUTO=y' "${KERNEL_SRC_DIR}/.config"; then
@@ -855,6 +907,21 @@ WantedBy=multi-user.target
 SERVICE
 }
 
+install_uwe5622_rootfs() {
+  log "安装 UWE5622 WiFi 固件和模块加载配置"
+  mkdir -p "${MNT_ROOT}/lib/firmware/uwe5622" "${MNT_ROOT}/etc/modules-load.d"
+  cp -a "${FIRMWARE_ASSETS_DIR}/wcnmodem.bin" \
+    "${FIRMWARE_ASSETS_DIR}/wcnmodem-38222.bin" \
+    "${FIRMWARE_ASSETS_DIR}/wifi_2355b001_1ant.ini" \
+    "${MNT_ROOT}/lib/firmware/uwe5622/"
+  ln -sfn uwe5622/wcnmodem.bin "${MNT_ROOT}/lib/firmware/wcnmodem.bin"
+  ln -sfn uwe5622/wifi_2355b001_1ant.ini "${MNT_ROOT}/lib/firmware/wifi_2355b001_1ant.ini"
+  cat <<'EOF2' > "${MNT_ROOT}/etc/modules-load.d/uwe5622-wifi.conf"
+sunxi_addr
+sprdwl_ng
+EOF2
+}
+
 configure_rootfs_in_chroot() {
   log "配置 rootfs"
   cat <<EOF2 > "${MNT_ROOT}/etc/hostname"
@@ -875,8 +942,9 @@ deb ${MIRROR} ${SUITE}-updates main contrib non-free non-free-firmware
 EOF2
 
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
-  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends debian-archive-keyring openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils zstd xz-utils locales"
+  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends debian-archive-keyring openssh-server network-manager wpasupplicant wireless-regdb rfkill ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils zstd xz-utils locales"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
+  install_uwe5622_rootfs
   
   # 确保 NetworkManager 管理所有网络接口
   cat <<'EOF2' > "${MNT_ROOT}/etc/NetworkManager/conf.d/10-globally-managed-devices.conf"
@@ -1059,99 +1127,6 @@ EOF2
   
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable zramswap.service"
   
-  # 创建 LED 调试脚本（默认行为由 U-Boot/内核设备树决定）
-  cat <<'EOF2' > "${MNT_ROOT}/usr/local/bin/led-control"
-#!/bin/bash
-# LED 控制脚本
-
-set_trigger() {
-  local led_dir="$1"
-  local mode="$2"
-  [ -d "$led_dir" ] || return 0
-  echo "$mode" > "$led_dir/trigger" 2>/dev/null || true
-}
-
-set_brightness() {
-  local led_dir="$1"
-  local value="$2"
-  [ -d "$led_dir" ] || return 0
-  echo "$value" > "$led_dir/brightness" 2>/dev/null || true
-}
-
-green_heartbeat_red_off() {
-  for led_dir in /sys/class/leds/*; do
-    [ -d "$led_dir" ] || continue
-    led_name=$(basename "$led_dir")
-
-    if [[ "$led_name" == *"red"* ]] || [[ "$led_name" == *"power"* ]]; then
-      set_trigger "$led_dir" none
-      set_brightness "$led_dir" 0
-      continue
-    fi
-
-    if [[ "$led_name" == *"green"* ]] || [[ "$led_name" == *"status"* ]]; then
-      set_trigger "$led_dir" heartbeat
-    fi
-  done
-
-  # 回退到常见固定路径
-  set_trigger /sys/class/leds/orangepi:red:power none
-  set_brightness /sys/class/leds/orangepi:red:power 0
-  set_trigger /sys/class/leds/orangepi:green:status heartbeat
-}
-
-show_leds() {
-  echo "可用的 LED："
-  for led in /sys/class/leds/*; do
-    if [ -d "$led" ]; then
-      echo "  $(basename $led)"
-      echo "    当前触发器: $(cat $led/trigger 2>/dev/null | grep -o '\[.*\]' | tr -d '[]')"
-      echo "    可用触发器: $(cat $led/trigger 2>/dev/null)"
-    fi
-  done
-}
-
-set_mode() {
-  local mode=$1
-  case $mode in
-    heartbeat)
-      echo "设置为绿灯心跳，红灯关闭"
-      green_heartbeat_red_off
-      ;;
-    all-heartbeat)
-      echo "设置为全部心跳模式"
-      for led in /sys/class/leds/*/trigger; do
-        echo heartbeat > "$led" 2>/dev/null || true
-      done
-      ;;
-    off)
-      echo "关闭所有 LED"
-      for led in /sys/class/leds/*/trigger; do
-        echo none > "$led" 2>/dev/null || true
-        echo 0 > "$(dirname $led)/brightness" 2>/dev/null || true
-      done
-      ;;
-    on)
-      echo "打开所有 LED"
-      for led in /sys/class/leds/*/trigger; do
-        echo none > "$led" 2>/dev/null || true
-        echo 1 > "$(dirname $led)/brightness" 2>/dev/null || true
-      done
-      ;;
-    *)
-      echo "用法: led-control [show|heartbeat|all-heartbeat|off|on]"
-      exit 1
-      ;;
-  esac
-}
-
-case ${1:-show} in
-  show) show_leds ;;
-  *) set_mode "$1" ;;
-esac
-EOF2
-  chmod +x "${MNT_ROOT}/usr/local/bin/led-control"
-  
   log "清理系统以减小镜像大小"
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get clean"
   chroot "${MNT_ROOT}" /bin/bash -c "rm -rf /var/lib/apt/lists/*"
@@ -1167,6 +1142,14 @@ install_compiled_kernel() {
   log "安装自编译内核模块"
   make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
     INSTALL_MOD_PATH="${MNT_ROOT}" DEPMOD=/bin/true modules_install
+
+  local required_module
+  for required_module in sunxi_addr uwe5622_bsp_sdio sprdwl_ng; do
+    if ! find "${MNT_ROOT}/lib/modules/${KERNEL_RELEASE}" -name "${required_module}.ko*" -print -quit | grep -q .; then
+      echo "缺少 UWE5622 内核模块: ${required_module}"
+      exit 1
+    fi
+  done
 
   cp "${ASSETS_DIR}/${ASSET_KERNEL_NAME}" "${MNT_BOOT}/${ASSET_KERNEL_NAME}"
   mkdir -p "${MNT_BOOT}/dtb"
@@ -1241,13 +1224,16 @@ create_update_bundle() {
   UPDATE_BUNDLE_OUTPUT="${output_dir}/${bundle_name}.tar.xz"
 
   rm -rf "${bundle_dir}" "${UPDATE_BUNDLE_OUTPUT}"
-  mkdir -p "${payload_dir}/boot/dtb" "${payload_dir}/lib/modules"
+  mkdir -p "${payload_dir}/boot/dtb" "${payload_dir}/lib/modules" \
+    "${payload_dir}/lib/firmware/uwe5622" "${payload_dir}/etc/modules-load.d"
 
   cp "${MNT_BOOT}/${ASSET_KERNEL_NAME}" "${payload_dir}/boot/${ASSET_KERNEL_NAME}"
   cp "${MNT_BOOT}/${ASSET_INITRD_NAME}" "${payload_dir}/boot/${ASSET_INITRD_NAME}"
   cp "${MNT_BOOT}/config-${KERNEL_RELEASE}" "${payload_dir}/boot/config-${KERNEL_RELEASE}"
   cp "${MNT_BOOT}/dtb/sun50i-h616-orangepi-zero2.dtb" "${payload_dir}/boot/dtb/"
   cp -a "${MNT_ROOT}/lib/modules/${KERNEL_RELEASE}" "${payload_dir}/lib/modules/"
+  cp -a "${MNT_ROOT}/lib/firmware/uwe5622/." "${payload_dir}/lib/firmware/uwe5622/"
+  cp "${MNT_ROOT}/etc/modules-load.d/uwe5622-wifi.conf" "${payload_dir}/etc/modules-load.d/"
 
   cat <<EOF2 > "${bundle_dir}/manifest.txt"
 Orange Pi Zero 2 kernel update bundle
@@ -1257,6 +1243,12 @@ Kernel image:   /boot/${ASSET_KERNEL_NAME}
 Initrd image:   /boot/${ASSET_INITRD_NAME}
 Device tree:    /boot/dtb/sun50i-h616-orangepi-zero2.dtb
 Modules:        /lib/modules/${KERNEL_RELEASE}
+Firmware:       /lib/firmware/uwe5622/
+Module config:  /etc/modules-load.d/uwe5622-wifi.conf
+
+The target system also needs the Debian packages wpasupplicant, wireless-regdb,
+and rfkill. New images install them automatically; install them manually before
+using this bundle on an older rootfs.
 
 Install:
   sudo ./install.sh
@@ -1302,6 +1294,10 @@ ensure_payload() {
     "${PAYLOAD_DIR}/boot/config-${KERNEL_RELEASE}"
     "${PAYLOAD_DIR}/boot/dtb/${DTB_IMAGE}"
     "${PAYLOAD_DIR}/lib/modules/${KERNEL_RELEASE}"
+    "${PAYLOAD_DIR}/lib/firmware/uwe5622/wcnmodem.bin"
+    "${PAYLOAD_DIR}/lib/firmware/uwe5622/wcnmodem-38222.bin"
+    "${PAYLOAD_DIR}/lib/firmware/uwe5622/wifi_2355b001_1ant.ini"
+    "${PAYLOAD_DIR}/etc/modules-load.d/uwe5622-wifi.conf"
   )
 
   for path in "${paths[@]}"; do
@@ -1314,6 +1310,26 @@ ensure_payload() {
     echo "更新包不完整，缺少:"
     printf '  %s\n' "${missing[@]}"
     exit 1
+  fi
+}
+
+warn_missing_wireless_userspace() {
+  local missing=()
+
+  if ! command -v wpa_supplicant >/dev/null 2>&1; then
+    missing+=(wpasupplicant)
+  fi
+  if ! command -v rfkill >/dev/null 2>&1; then
+    missing+=(rfkill)
+  fi
+  if command -v dpkg-query >/dev/null 2>&1 && \
+     ! dpkg-query -W -f='${db:Status-Abbrev}' wireless-regdb 2>/dev/null | grep -q '^ii'; then
+    missing+=(wireless-regdb)
+  fi
+
+  if [[ "${#missing[@]}" -ne 0 ]]; then
+    log "警告: 系统缺少 WiFi 用户态组件: ${missing[*]}"
+    log "联网后安装: apt-get update && apt-get install -y ${missing[*]}"
   fi
 }
 
@@ -1347,6 +1363,10 @@ backup_current_boot() {
   backup_file "/boot/config-${KERNEL_RELEASE}"
   backup_file "/boot/dtb/${DTB_IMAGE}"
   backup_file /boot/extlinux/extlinux.conf
+  backup_file /lib/firmware/uwe5622
+  backup_file /lib/firmware/wcnmodem.bin
+  backup_file /lib/firmware/wifi_2355b001_1ant.ini
+  backup_file /etc/modules-load.d/uwe5622-wifi.conf
 }
 
 archive_file() {
@@ -1406,6 +1426,15 @@ install_boot_files() {
   install -m 0644 "${PAYLOAD_DIR}/boot/${INITRD_IMAGE}" "/boot/${INITRD_IMAGE}"
   install -m 0644 "${PAYLOAD_DIR}/boot/config-${KERNEL_RELEASE}" "/boot/config-${KERNEL_RELEASE}"
   install -m 0644 "${PAYLOAD_DIR}/boot/dtb/${DTB_IMAGE}" "/boot/dtb/${DTB_IMAGE}"
+}
+
+install_wireless_files() {
+  log "安装 UWE5622 固件和模块加载配置"
+  mkdir -p /lib/firmware/uwe5622 /etc/modules-load.d
+  cp -a "${PAYLOAD_DIR}/lib/firmware/uwe5622/." /lib/firmware/uwe5622/
+  ln -sfn uwe5622/wcnmodem.bin /lib/firmware/wcnmodem.bin
+  ln -sfn uwe5622/wifi_2355b001_1ant.ini /lib/firmware/wifi_2355b001_1ant.ini
+  install -m 0644 "${PAYLOAD_DIR}/etc/modules-load.d/uwe5622-wifi.conf" /etc/modules-load.d/uwe5622-wifi.conf
 }
 
 update_extlinux() {
@@ -1567,10 +1596,12 @@ pack_backup_archive() {
 main() {
   require_root
   ensure_payload
+  warn_missing_wireless_userspace
   ensure_boot_mounted
   backup_current_boot
   install_modules
   install_boot_files
+  install_wireless_files
   update_extlinux
   archive_old_boot_versions
   pack_backup_archive
