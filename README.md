@@ -7,6 +7,7 @@
 * **自动化构建**：利用 GitHub Actions 实现全自动构建，流程透明可追溯。
 * **纯净系统**：基于 `debootstrap` 构建的原生 Debian 13 (`trixie`) rootfs，无多余预装。
 * **Linux 7.1 内核**：构建时自动解析 Linux 7.1 系列的最新补丁版本，并集成 Armbian 的 H616/Zero 2 板级补丁。
+* **U-Boot 2026.07**：使用与 Armbian sunxi64 当前配置一致的主线 U-Boot 稳定版本。
 * **Btrfs 根分区**：默认使用 Btrfs 文件系统，支持透明压缩 (ZSTD) 和快照功能。
 * **开箱即用**：
     * 首次启动自动扩容根分区。
@@ -83,6 +84,7 @@ sudo ./build.sh
 | `--update-bundle` | 是否生成已安装系统内核更新包 (`auto`/`yes`/`no`) | `auto` |
 | `--debootstrap-keyring` | debootstrap 验签使用的 Debian archive keyring | `/usr/share/keyrings/debian-archive-keyring.gpg` |
 | `--kernel-ref` | Linux 内核分支/标签；`7.1` 会自动解析最新的 `v7.1.x` | `7.1` |
+| `--uboot-ref` | U-Boot 分支/标签 | `v2026.07` |
 | `--root-pass` | Root 用户密码 | `orangepi` |
 
 ## 📝 镜像默认配置
