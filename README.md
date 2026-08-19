@@ -80,8 +80,10 @@ sudo dd if=/dev/sdX bs=4M status=progress | gzip -c > backup-$(date +%Y%m%d).img
 恢复压缩镜像：
 
 ```bash
-gunzip -c backup-*.img.gz | sudo dd of=/dev/sdX bs=4M status=progress
+gunzip -c backup-20260819.img.gz | sudo dd of=/dev/sdX bs=4M status=progress
 ```
+
+将 `backup-20260819.img.gz` 替换为实际要恢复的单个备份文件，避免通配符同时匹配多个备份。
 
 > ⚠️ **注意**：使用 dd 恢复时，目标设备容量必须大于或等于源镜像大小。
 
@@ -122,14 +124,22 @@ sudo reboot
 |---|---|---|
 | `--image-size` | 镜像文件大小 | `3G` |
 | `--suite` | Debian 发行版代号 | `trixie` |
-| `--arch` | 目标架构 | `arm64` |
+| `--arch` | 目标架构（当前仅支持 `arm64`） | `arm64` |
 | `--hostname` | 系统主机名 | `orangepi` |
 | `--mirror` | Apt 镜像源地址 | `http://mirrors.ustc.edu.cn/debian` |
+| `--output` | 未压缩镜像输出路径 | `./orangepi-zero2-debian13-trixie-btrfs.img` |
 | `--compress` | 压缩输出 (`xz` / `none`) | `xz` |
 | `--update-bundle` | 是否生成内核更新包 (`auto`/`yes`/`no`) | `auto` |
-| `--kernel-ref` | Linux 内核分支/标签 | `7.1` |
+| `--debootstrap-keyring` | Debian archive keyring 路径 | `/usr/share/keyrings/debian-archive-keyring.gpg` |
+| `--workdir` | 构建工作目录 | 自动创建临时目录 |
+| `--kernel-repo` | Linux 内核仓库地址 | `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git` |
+| `--kernel-ref` | Linux 内核分支/标签；`7.1` 自动解析最新 `v7.1.x` | `7.1` |
+| `--kernel-defconfig` | 内核默认配置名 | `defconfig` |
+| `--uboot-repo` | U-Boot 仓库地址 | `https://github.com/u-boot/u-boot.git` |
 | `--uboot-ref` | U‑Boot 分支/标签 | `v2026.07` |
+| `--atf-repo` | TF-A 仓库地址 | `https://github.com/ARM-software/arm-trusted-firmware.git` |
 | `--atf-ref` | TF‑A 分支/标签 | `lts-v2.12.9` |
+| `--jobs` | 并行编译任务数 | `$(nproc)` |
 | `--root-pass` | Root 用户密码 | `orangepi` |
 
 ---
@@ -143,6 +153,8 @@ sudo reboot
 - **语言环境**：`en_US.UTF-8`
 - **时区**：`Asia/Shanghai`
 - **分区**：`/boot` (FAT32, 128MB) + `/` (Btrfs 子卷 `@`, 剩余空间)
+
+> **安全提示**：镜像默认允许 root 通过 SSH 使用密码登录，默认密码为 `orangepi`。接入网络前，请使用 `--root-pass` 设置自定义密码，或登录后立即修改 root 密码。
 
 ### 网络
 
@@ -186,4 +198,3 @@ nmcli connection up Wired-end0
 ## 📄 License
 
 本项目基于 [MIT License](https://github.com/imengying/orangepi/blob/main/LICENSE) 开源。
-
