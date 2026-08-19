@@ -16,7 +16,8 @@
 - **Btrfs 根分区**：默认使用 Btrfs，支持 ZSTD 透明压缩和快照功能
 - **首次启动自动扩容**：根分区自动扩展至整张 TF 卡可用空间
 - **ZRAM 内存压缩**：默认启用 `lz4` 算法，优化小内存设备性能
-- **无线与网络**：集成 UWE5622 2.4GHz WiFi 固件与 NetworkManager，有线 DHCP 即插即用
+- **有线网络**：NetworkManager 管理 `end0`，默认通过 DHCP 即插即用
+- **精简硬件支持**：不集成 WiFi、蓝牙、GPU、音频及媒体驱动
 - **LED 状态指示**：红灯心跳、绿灯常亮，由内核设备树直接定义
 
 ---
@@ -102,7 +103,7 @@ sudo ./install.sh
 sudo reboot
 ```
 
-更新包将替换 `/boot` 中的内核、initrd、设备树、内核配置、`/lib/modules/<版本>` 及 UWE5622 固件，**不会改写 U‑Boot 或分区表**。
+更新包将替换 `/boot` 中的内核、initrd、设备树、内核配置及 `/lib/modules/<版本>`，**不会改写 U‑Boot 或分区表**。
 
 安装脚本自动将旧版本备份至 `/root/orangepi-kernel-backup-*.tar.xz`。确认新内核正常后，可运行以下脚本清理：
 
@@ -162,15 +163,9 @@ sudo reboot
 ### 网络
 
 - 有线网卡 `end0` 默认 DHCP 获取 IP
-- UWE5622 WiFi (2.4GHz) 已启用，可通过 NetworkManager 连接
+- WiFi、蓝牙、GPU、音频和媒体驱动未编译，也不安装相关用户态组件
 
 ```bash
-# 扫描 WiFi
-nmcli device wifi list
-
-# 连接 WiFi
-nmcli device wifi connect "网络名称" password "无线密码"
-
 # 配置静态 IP（示例）
 nmcli connection modify Wired-end0 ipv4.method manual \
     ipv4.addresses 192.168.1.100/24 \
@@ -186,15 +181,16 @@ nmcli connection up Wired-end0
 
 ---
 
-## 📶 无线支持
+## 硬件支持范围
 
-镜像集成了 Armbian 针对 UWE5622 芯片的驱动方案：
+由于这些闭源适配比较麻烦，所以镜像排除以下组件：
 
-- 内核使用固定版本的板外驱动
-- 设备树包含 SDIO、电源及复位时序
-- 固件在构建时按 SHA256 校验后安装至 `/lib/firmware/uwe5622/`
-
-> 该芯片提供 2.4GHz 802.11b/g/n WiFi，驱动及固件属于社区维护的板外组件，非 Linux 主线驱动。蓝牙驱动源码虽已编译，但本镜像暂未配置蓝牙串口附着服务。
+- UWE5622 WiFi/蓝牙设备树节点及电源时序
+- UWE5622、`sprdwl_ng`、`tty-sdio`、`sunxi-addr` 驱动
+- UWE5622 固件、`wpasupplicant`、`wireless-regdb` 和 `rfkill`
+- Mali GPU、DRM、ALSA、V4L2、红外、NFC、CAN、WWAN 及 staging 驱动
+- 非 Allwinner ARM64 平台、PCI/ACPI/KVM/Xen、VirtIO、SPI-NOR 和普通 I²C
+- 32 位用户态兼容及非 ZSTD initramfs 解压格式
 
 ---
 

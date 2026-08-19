@@ -24,13 +24,10 @@ UBOOT_REPO="${UBOOT_REPO:-https://github.com/u-boot/u-boot.git}"
 UBOOT_REF="${UBOOT_REF:-v2026.07}"
 ATF_REPO="${ATF_REPO:-https://github.com/ARM-software/arm-trusted-firmware.git}"
 ATF_REF="${ATF_REF:-lts-v2.12.9}"
-UWE5622_REPO="${UWE5622_REPO:-https://github.com/armbian/uwe5622.git}"
-UWE5622_REF="${UWE5622_REF:-d6bec7538a0b4b67e35715ad71eaa056555524cb}"
 JOBS="${JOBS:-$(nproc)}"
 BTRFS_ROOT_SUBVOL="${BTRFS_ROOT_SUBVOL:-@}"
 
 ARMBIAN_BUILD_COMMIT="fd4ebfd1e107d5b89f7a672c7d609789565753b2"
-ARMBIAN_FIRMWARE_COMMIT="f50a2a21bcdb77a562b3976930c5c6b521a1df08"
 
 LOOP_OUTPUT=""
 WORKDIR_CREATED=""
@@ -41,9 +38,7 @@ SRC_DIR=""
 KERNEL_SRC_DIR=""
 UBOOT_SRC_DIR=""
 ATF_SRC_DIR=""
-UWE5622_SRC_DIR=""
 VENDOR_INPUTS_DIR=""
-FIRMWARE_ASSETS_DIR=""
 ATF_BL31=""
 KERNEL_RELEASE=""
 ASSET_KERNEL_NAME="Image"
@@ -320,14 +315,11 @@ init_workdir() {
   KERNEL_SRC_DIR="${SRC_DIR}/linux"
   UBOOT_SRC_DIR="${SRC_DIR}/u-boot"
   ATF_SRC_DIR="${SRC_DIR}/arm-trusted-firmware"
-  UWE5622_SRC_DIR="${SRC_DIR}/uwe5622"
   VENDOR_INPUTS_DIR="${SRC_DIR}/vendor-inputs"
-  FIRMWARE_ASSETS_DIR="${ASSETS_DIR}/firmware/uwe5622"
   MNT_ROOT="${WORKDIR_CREATED}/rootfs"
   MNT_BOOT="${WORKDIR_CREATED}/rootfs/boot"
 
-  mkdir -p "${ASSETS_DIR}/dtb" "${SRC_DIR}" "${VENDOR_INPUTS_DIR}" \
-    "${FIRMWARE_ASSETS_DIR}" "${MNT_ROOT}"
+  mkdir -p "${ASSETS_DIR}/dtb" "${SRC_DIR}" "${VENDOR_INPUTS_DIR}" "${MNT_ROOT}"
   log "工作目录: ${WORKDIR_CREATED}"
 }
 
@@ -350,7 +342,6 @@ fetch_verified_file() {
 
 fetch_armbian_inputs() {
   local patch_base="https://raw.githubusercontent.com/armbian/build/${ARMBIAN_BUILD_COMMIT}/patch/kernel/archive/sunxi-7.1/patches.armbian"
-  local firmware_base="https://raw.githubusercontent.com/armbian/firmware/${ARMBIAN_FIRMWARE_COMMIT}/uwe5622"
 
   log "获取并校验 Armbian 7.1 板级补丁"
   fetch_verified_file "${patch_base}/arm64-dts-sun50i-h616-orangepi-zero2-enable-usb1-vbus.patch" \
@@ -359,73 +350,22 @@ fetch_armbian_inputs() {
   fetch_verified_file "${patch_base}/arm64-dts-sun50i-h616-orangepi-zero2-fix-led-functions.patch" \
     "a40156ed2247b7a0ebc4410f6c749884da789e675121467fba1a044447a33bc5" \
     "${VENDOR_INPUTS_DIR}/02-fix-led-functions.patch"
-  fetch_verified_file "${patch_base}/arm64-dts-sun50i-h616-orangepi-zero2-zero3-add-wifi.patch" \
-    "cb868019ea15201922df7fd9869059a4f04f5aaf8d3fd61d267fe7939d0b6355" \
-    "${VENDOR_INPUTS_DIR}/03-add-wifi.patch"
-  fetch_verified_file "${patch_base}/arm64-dts-sun50i-h6-h616-add-sunxi-info-nodes.patch" \
-    "5abc775c41de738382a6214d77ccb274d730f1611a43a3a99b033aff9f181422" \
-    "${VENDOR_INPUTS_DIR}/04-add-sunxi-info-nodes.patch"
-  fetch_verified_file "${patch_base}/drv-nvmem-sunxi-add-chipid-serial-helpers.patch" \
-    "e7ad23a9b5331d0f132a152f49db008c6cb95da30c33990b13ee54b2c1e88c5b" \
-    "${VENDOR_INPUTS_DIR}/05-add-sunxi-chipid-helpers.patch"
   fetch_verified_file "${patch_base}/drv-nvmem-sunxi-add-h616-support.patch" \
     "a2ae77146f78c43cc5727b2cdf428ab9703789abd11e2383e5f55ea290958ad4" \
     "${VENDOR_INPUTS_DIR}/06-add-h616-sid-support.patch"
-  fetch_verified_file "${patch_base}/drv-misc-sunxi-add-addr-mgt-driver-uwe5622.patch" \
-    "ee2cf5a3cb252600d4cef4d6554a08606765c334476622315b82ca4d13671d50" \
-    "${VENDOR_INPUTS_DIR}/07-add-sunxi-addr-driver.patch"
-
-  log "获取并校验 UWE5622 固件"
-  fetch_verified_file "${firmware_base}/wcnmodem.bin" \
-    "119b87ce30875734a67462f7293fb8fe85acf3270fe8b78c978ae24be7715a80" \
-    "${FIRMWARE_ASSETS_DIR}/wcnmodem.bin"
-  fetch_verified_file "${firmware_base}/wcnmodem-38222.bin" \
-    "8a49a087bc26a95f89f3df9d9f5780ab3463fbdfc6b71d3892e7bae8f2999260" \
-    "${FIRMWARE_ASSETS_DIR}/wcnmodem-38222.bin"
-  fetch_verified_file "${firmware_base}/wifi_2355b001_1ant.ini" \
-    "1f3c40ec245a8d0b99ad1c23706597d6dd5008ab80cefb7bcc1956efc4e938f7" \
-    "${FIRMWARE_ASSETS_DIR}/wifi_2355b001_1ant.ini"
 }
 
 clone_repo() {
   local repo="$1"
   local ref="$2"
   local dst="$3"
-  local -a candidates=("${ref}")
-  local cand
-  local major=""
-  local minor=""
-
-  if [[ "${ref}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-    major="${BASH_REMATCH[1]}"
-    minor="${BASH_REMATCH[2]}"
-    candidates+=("v${major}.${minor}.0" "v${major}.${minor}")
-  elif [[ "${ref}" =~ ^v([0-9]+)\.([0-9]+)$ ]]; then
-    major="${BASH_REMATCH[1]}"
-    minor="${BASH_REMATCH[2]}"
-    candidates+=("v${major}.${minor}.0")
+  rm -rf "${dst}"
+  if ! git clone --depth 1 --branch "${ref}" "${repo}" "${dst}" >/dev/null 2>&1; then
+    echo "无法检出源码版本: ${repo} @ ${ref}"
+    echo "请通过 --kernel-ref / --uboot-ref / --atf-ref 指定存在的分支或标签。"
+    exit 1
   fi
-
-  for cand in "${candidates[@]}"; do
-    rm -rf "${dst}"
-    if git clone --depth 1 --branch "${cand}" "${repo}" "${dst}" >/dev/null 2>&1; then
-      log "源码版本: ${repo} @ ${cand}"
-      return
-    fi
-
-    rm -rf "${dst}"
-    if git clone --depth 1 "${repo}" "${dst}" >/dev/null 2>&1; then
-      if git -C "${dst}" fetch --depth 1 origin "${cand}" >/dev/null 2>&1 && \
-         git -C "${dst}" checkout --detach FETCH_HEAD >/dev/null 2>&1; then
-        log "源码版本: ${repo} @ ${cand}"
-        return
-      fi
-    fi
-  done
-
-  echo "无法检出源码版本: ${repo} @ ${ref}"
-  echo "请通过 --kernel-ref / --uboot-ref / --atf-ref 指定存在的分支或标签。"
-  exit 1
+  log "源码版本: ${repo} @ ${ref}"
 }
 
 fetch_sources() {
@@ -434,7 +374,6 @@ fetch_sources() {
   clone_repo "${ATF_REPO}" "${ATF_REF}" "${ATF_SRC_DIR}"
   clone_repo "${UBOOT_REPO}" "${UBOOT_REF}" "${UBOOT_SRC_DIR}"
   clone_repo "${KERNEL_REPO}" "${KERNEL_REF}" "${KERNEL_SRC_DIR}"
-  clone_repo "${UWE5622_REPO}" "${UWE5622_REF}" "${UWE5622_SRC_DIR}"
   fetch_armbian_inputs
 }
 
@@ -452,17 +391,9 @@ build_uboot() {
   log "编译 U-Boot"
   make -C "${UBOOT_SRC_DIR}" distclean >/dev/null 2>&1 || true
   make -C "${UBOOT_SRC_DIR}" CROSS_COMPILE=aarch64-linux-gnu- orangepi_zero2_defconfig
-  if [[ -x "${UBOOT_SRC_DIR}/scripts/config" ]]; then
-    "${UBOOT_SRC_DIR}/scripts/config" --file "${UBOOT_SRC_DIR}/.config" \
-      --disable TOOLS_MKEFICAPSULE \
-      --set-val BOOTDELAY 0 || true
-  else
-    if grep -q '^CONFIG_BOOTDELAY=' "${UBOOT_SRC_DIR}/.config"; then
-      sed -i 's/^CONFIG_BOOTDELAY=.*/CONFIG_BOOTDELAY=0/' "${UBOOT_SRC_DIR}/.config"
-    else
-      echo "CONFIG_BOOTDELAY=0" >> "${UBOOT_SRC_DIR}/.config"
-    fi
-  fi
+  "${UBOOT_SRC_DIR}/scripts/config" --file "${UBOOT_SRC_DIR}/.config" \
+    --disable TOOLS_MKEFICAPSULE \
+    --set-val BOOTDELAY 0
   make -C "${UBOOT_SRC_DIR}" CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
   make -C "${UBOOT_SRC_DIR}" -j"${JOBS}" CROSS_COMPILE=aarch64-linux-gnu- BL31="${ATF_BL31}"
 
@@ -474,204 +405,96 @@ build_uboot() {
   cp "${uboot_bin}" "${ASSETS_DIR}/uboot.bin"
 }
 
-patch_vendor_warning_sources() {
-  local addr_dir="${KERNEL_SRC_DIR}/drivers/misc/sunxi-addr"
-  local sid_file="${KERNEL_SRC_DIR}/drivers/nvmem/sunxi_sid.c"
-  local cmdevt_file="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622/unisocwifi/cmdevt.c"
-
-  # These exported helpers come from the vendor patches and need declarations
-  # before their definitions for the kernel's missing-prototypes warning.
-  if ! grep -Fq 'int hmac_sha256(const uint8_t *plaintext, ssize_t psize, uint8_t *output);' \
-    "${addr_dir}/sha256.c"; then
-    sed -i '/^int hmac_sha256(/i int hmac_sha256(const uint8_t *plaintext, ssize_t psize, uint8_t *output);' \
-      "${addr_dir}/sha256.c"
-  fi
-  if ! grep -Fq 'int get_custom_mac_address(int fmt, char *name, char *addr);' \
-    "${addr_dir}/sunxi-addr.c"; then
-    sed -i '/^int get_custom_mac_address(/i int get_custom_mac_address(int fmt, char *name, char *addr);' \
-      "${addr_dir}/sunxi-addr.c"
-  fi
-  if ! grep -Fq 'int sunxi_get_soc_chipid(unsigned char *chipid);' "${sid_file}"; then
-    sed -i '/^int sunxi_get_soc_chipid(unsigned char \*chipid)$/i int sunxi_get_soc_chipid(unsigned char *chipid);' "${sid_file}"
-  fi
-  if ! grep -Fq 'int sunxi_get_serial(unsigned char *serial);' "${sid_file}"; then
-    sed -i '/^int sunxi_get_soc_chipid(unsigned char \*chipid)$/i int sunxi_get_serial(unsigned char *serial);' "${sid_file}"
-  fi
-
-  # The response sizes are compile-time constants; fixed arrays avoid the
-  # vendor driver's -Wvla-larger-than warnings without changing its protocol.
-  sed -i \
-    -e '/u16 r_len = sizeof(\*fw_api);/{n;s/u8 r_buf\[r_len\];/u8 r_buf[sizeof(*fw_api)];/;}' \
-    -e '/u16 r_len = sizeof(\*p) + GET_INFO_TLV_RBUF_SIZE;/{n;n;s/u8 r_buf\[r_len\];/u8 r_buf[sizeof(*p) + GET_INFO_TLV_RBUF_SIZE];/;}' \
-    -e '/u16 r_len = sizeof(\*packet);/{n;s/u8 r_buf\[r_len\];/u8 r_buf[sizeof(*packet)];/;}' \
-    "${cmdevt_file}"
-
-  if grep -Fq 'u8 r_buf[r_len];' "${cmdevt_file}"; then
-    echo "UWE5622 cmdevt.c 可变长栈数组修补失败"
-    exit 1
-  fi
-}
-
-patch_wifi_pwrseq() {
-  local pwrseq_file="${KERNEL_SRC_DIR}/drivers/mmc/core/pwrseq_simple.c"
-
-  if [[ ! -f "${pwrseq_file}" ]]; then
-    echo "缺少 MMC 简单电源时序驱动源码: ${pwrseq_file}"
-    exit 1
-  fi
-  if grep -Fq 'H616 uses a GPIO reset, not a reset-controller line.' "${pwrseq_file}"; then
-    return
-  fi
-  if ! grep -Fq 'devm_reset_control_get_optional_shared' "${pwrseq_file}"; then
-    echo "当前内核的 pwrseq_simple.c 未找到预期 reset controller 路径"
-    exit 1
-  fi
-
-  # Linux 7.1 tries a reset-controller lookup for a single reset-gpios entry.
-  # H616 uses a GPIO reset, so -ENOENT must fall through to gpiod instead of
-  # preventing wifi-pwrseq from registering and crashing the vendor driver.
-  perl -0pi -e 's/\tpwrseq->reset_ctrl = devm_reset_control_get_optional_shared\(dev, NULL\);\n\t\tif \(IS_ERR\(pwrseq->reset_ctrl\)\)\n\t\t\treturn dev_err_probe\(dev, PTR_ERR\(pwrseq->reset_ctrl\),\n\t\t\t\t\t     "reset control not ready\\n"\);/\tpwrseq->reset_ctrl = devm_reset_control_get_optional_shared(dev, NULL);\n\t\tif (IS_ERR(pwrseq->reset_ctrl)) {\n\t\t\tif (PTR_ERR(pwrseq->reset_ctrl) != -ENOENT)\n\t\t\t\treturn dev_err_probe(dev, PTR_ERR(pwrseq->reset_ctrl),\n\t\t\t\t\t     "reset control not ready\\n");\n\t\t\t\/\* H616 uses a GPIO reset, not a reset-controller line. *\/\n\t\t\tpwrseq->reset_ctrl = NULL;\n\t\t}/' "${pwrseq_file}"
-
-  if ! grep -Fq 'H616 uses a GPIO reset, not a reset-controller line.' "${pwrseq_file}"; then
-    echo "wifi-pwrseq GPIO 回退修补失败"
-    exit 1
-  fi
-}
-
-patch_uwe_initialization() {
-  local procfs_file="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622/unisocwcn/platform/wcn_procfs.c"
-  local procfs_header="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622/unisocwcn/platform/wcn_procfs.h"
-  local boot_file="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622/unisocwcn/platform/wcn_boot.c"
-  local wifi_file="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622/unisocwifi/wl_core.c"
-
-  for source_file in "${procfs_file}" "${procfs_header}" "${boot_file}" "${wifi_file}"; do
-    if [[ ! -f "${source_file}" ]]; then
-      echo "UWE5622 初始化源码缺失: ${source_file}"
-      exit 1
-    fi
-  done
-
-  # The vendor BSP can expose the Wi-Fi platform device before its procfs
-  # state is ready.  Return deferred-probe instead of dereferencing NULL.
-  if ! grep -Fq 'return mdbg_proc ? mdbg_proc->fail_count : -EPROBE_DEFER;' "${procfs_file}"; then
-    if ! grep -Fq '#include <linux/errno.h>' "${procfs_file}"; then
-      sed -i '/^#include <linux\/of.h>$/i #include <linux/errno.h>' "${procfs_file}"
-    fi
-    perl -0pi -e 's/int get_loopcheck_status\(void\)\n\{\n\treturn mdbg_proc->fail_count;\n\}/int get_loopcheck_status(void)\n{\n\treturn mdbg_proc ? mdbg_proc->fail_count : -EPROBE_DEFER;\n}/' "${procfs_file}"
-  fi
-  if ! grep -Fq 'return mdbg_proc ? mdbg_proc->fail_count : -EPROBE_DEFER;' "${procfs_file}"; then
-    echo "UWE5622 loopcheck 空指针修补失败"
-    exit 1
-  fi
-
-  local wakeup_guard=$'void wakeup_loopcheck_int(void)\n{\n\tif (mdbg_proc)\n\t\twake_up_interruptible(&mdbg_proc->loopcheck.rxwait);\n}'
-  if ! grep -Fq "${wakeup_guard}" "${procfs_file}"; then
-    perl -0pi -e 's/void wakeup_loopcheck_int\(void\)\n\{\n\twake_up_interruptible\(&mdbg_proc->loopcheck\.rxwait\);\n\}/void wakeup_loopcheck_int(void)\n{\n\tif (mdbg_proc)\n\t\twake_up_interruptible(\&mdbg_proc->loopcheck.rxwait);\n}/' "${procfs_file}"
-  fi
-  if ! grep -Fq "${wakeup_guard}" "${procfs_file}"; then
-    echo "UWE5622 loopcheck 唤醒保护修补失败"
-    exit 1
-  fi
-
-  # Preserve -EPROBE_DEFER through start_marlin() and sprdwl_probe(); the
-  # platform core can then retry Wi-Fi after the BSP procfs has initialized.
-  if ! grep -Fq 'int loopcheck_status;' "${boot_file}"; then
-    perl -0pi -e 's/int start_marlin\(u32 subsys\)\n\{/int start_marlin(u32 subsys)\n{\n\tint loopcheck_status;/' "${boot_file}"
-  fi
-  if ! grep -Fq 'loopcheck_status = get_loopcheck_status();' "${boot_file}"; then
-    perl -0pi -e 's/\tif \(get_loopcheck_status\(\)\) \{\n\t\tWCN_ERR\("%s loopcheck status is fail\\n", __func__\);\n\t\treturn -1;\n\t\}/\tloopcheck_status = get_loopcheck_status();\n\tif (loopcheck_status == -EPROBE_DEFER) {\n\t\tWCN_ERR("%s loopcheck state is not ready\\n", __func__);\n\t\treturn -EPROBE_DEFER;\n\t}\n\tif (loopcheck_status) {\n\t\tWCN_ERR("%s loopcheck status is fail\\n", __func__);\n\t\treturn -1;\n\t\}/' "${boot_file}"
-  fi
-  if ! grep -Fq 'loopcheck state is not ready' "${boot_file}"; then
-    echo "UWE5622 BSP deferred-probe 修补失败"
-    exit 1
-  fi
-
-  if ! grep -Fq 'ret = start_marlin(MARLIN_WIFI);' "${wifi_file}"; then
-    perl -0pi -e 's/\tif \(start_marlin\(MARLIN_WIFI\)\) \{\n\t\twl_err\("%s power on chipset failed\\n", __func__\);\n\t\treturn -ENODEV;\n\t\}/\tret = start_marlin(MARLIN_WIFI);\n\tif (ret) {\n\t\twl_err("%s power on chipset failed: %d\\n", __func__, ret);\n\t\treturn ret == -EPROBE_DEFER ? ret : -ENODEV;\n\t\}/' "${wifi_file}"
-  fi
-  if ! grep -Fq 'return ret == -EPROBE_DEFER ? ret : -ENODEV;' "${wifi_file}"; then
-    echo "UWE5622 WiFi deferred-probe 修补失败"
-    exit 1
-  fi
-}
-
 apply_kernel_patches() {
   local patch_file
-  local wireless_dir="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622"
 
   log "应用 Armbian Zero 2 7.1 板级补丁"
   for patch_file in \
     01-enable-usb1-vbus.patch \
     02-fix-led-functions.patch \
-    03-add-wifi.patch \
-    04-add-sunxi-info-nodes.patch \
-    05-add-sunxi-chipid-helpers.patch \
     06-add-h616-sid-support.patch; do
     git -C "${KERNEL_SRC_DIR}" apply --check --whitespace=nowarn "${VENDOR_INPUTS_DIR}/${patch_file}"
     git -C "${KERNEL_SRC_DIR}" apply --whitespace=nowarn "${VENDOR_INPUTS_DIR}/${patch_file}"
   done
-
-  # The upstream patch only conflicts with the moving parent Makefile hunk.
-  git -C "${KERNEL_SRC_DIR}" apply --check --whitespace=nowarn \
-    --exclude=drivers/misc/Makefile "${VENDOR_INPUTS_DIR}/07-add-sunxi-addr-driver.patch"
-  git -C "${KERNEL_SRC_DIR}" apply --whitespace=nowarn \
-    --exclude=drivers/misc/Makefile "${VENDOR_INPUTS_DIR}/07-add-sunxi-addr-driver.patch"
-  if ! grep -Fq 'obj-$(CONFIG_SUNXI_ADDR_MGT) += sunxi-addr/' "${KERNEL_SRC_DIR}/drivers/misc/Makefile"; then
-    printf '%s\n' 'obj-$(CONFIG_SUNXI_ADDR_MGT) += sunxi-addr/' >> "${KERNEL_SRC_DIR}/drivers/misc/Makefile"
-  fi
-
-  if [[ ! -d "${UWE5622_SRC_DIR}/unisocwcn" || ! -d "${UWE5622_SRC_DIR}/unisocwifi" ]]; then
-    echo "UWE5622 源码不完整: ${UWE5622_SRC_DIR}"
-    exit 1
-  fi
-  rm -rf "${wireless_dir}"
-  mkdir -p "${wireless_dir}"
-  cp -a "${UWE5622_SRC_DIR}/tty-sdio" "${UWE5622_SRC_DIR}/unisocwcn" \
-    "${UWE5622_SRC_DIR}/unisocwifi" "${UWE5622_SRC_DIR}/Kconfig" \
-    "${UWE5622_SRC_DIR}/Makefile" "${wireless_dir}/"
-
-  if ! grep -Fq 'source "drivers/net/wireless/uwe5622/Kconfig"' \
-    "${KERNEL_SRC_DIR}/drivers/net/wireless/Kconfig"; then
-    sed -i '/source "drivers\/net\/wireless\/ti\/Kconfig"/a source "drivers/net/wireless/uwe5622/Kconfig"' \
-      "${KERNEL_SRC_DIR}/drivers/net/wireless/Kconfig"
-  fi
-  if ! grep -Fq 'obj-$(CONFIG_SPARD_WLAN_SUPPORT) += uwe5622/' \
-    "${KERNEL_SRC_DIR}/drivers/net/wireless/Makefile"; then
-    printf '%s\n' 'obj-$(CONFIG_SPARD_WLAN_SUPPORT) += uwe5622/' >> \
-      "${KERNEL_SRC_DIR}/drivers/net/wireless/Makefile"
-  fi
-
-  patch_wifi_pwrseq
-  patch_uwe_initialization
-  patch_vendor_warning_sources
 }
 
 assert_kernel_config() {
   local expected
+  local symbol
   local missing=()
+  local enabled=()
 
   for expected in \
-    CONFIG_WLAN=y \
-    CONFIG_CFG80211=m \
-    CONFIG_MAC80211=m \
-    CONFIG_RFKILL=y \
+    CONFIG_ARCH_SUNXI=y \
+    CONFIG_RD_ZSTD=y \
+    CONFIG_BTRFS_FS=y \
+    CONFIG_ZSMALLOC=m \
+    CONFIG_ZRAM=m \
+    CONFIG_SCSI=y \
+    CONFIG_BLK_DEV_SD=y \
+    CONFIG_USB_EHCI_HCD=y \
+    CONFIG_USB_OHCI_HCD=y \
+    CONFIG_USB_STORAGE=y \
+    CONFIG_USB_MUSB_SUNXI=y \
+    CONFIG_PHY_SUN4I_USB=y \
+    CONFIG_EXTCON=y \
+    CONFIG_MMC=y \
+    CONFIG_MMC_SUNXI=y \
+    CONFIG_STMMAC_ETH=y \
+    CONFIG_STMMAC_PLATFORM=y \
+    CONFIG_DWMAC_SUN8I=y \
     CONFIG_NVMEM_SUNXI_SID=y \
-    CONFIG_SPARD_WLAN_SUPPORT=y \
-    CONFIG_AW_WIFI_DEVICE_UWE5622=y \
-    CONFIG_AW_BIND_VERIFY=y \
-    CONFIG_WLAN_UWE5622=m \
-    CONFIG_SPRDWL_NG=m \
-    CONFIG_UNISOC_WIFI_PS=y \
-    CONFIG_TTY_OVERY_SDIO=m \
-    CONFIG_SUNXI_ADDR_MGT=m; do
+    CONFIG_MFD_AXP20X_RSB=y \
+    CONFIG_REGULATOR_FIXED_VOLTAGE=y \
+    CONFIG_REGULATOR_AXP20X=y \
+    CONFIG_CPUFREQ_DT=y \
+    CONFIG_ARM_ALLWINNER_SUN50I_CPUFREQ_NVMEM=m \
+    CONFIG_SUN8I_THERMAL=y \
+    CONFIG_SERIAL_8250_DW=y \
+    CONFIG_RTC_DRV_SUN6I=y \
+    CONFIG_LEDS_GPIO=y \
+    CONFIG_LEDS_TRIGGER_HEARTBEAT=y \
+    CONFIG_LEDS_TRIGGER_DEFAULT_ON=y \
+    CONFIG_DMA_SUN6I=m \
+    CONFIG_SUNXI_WATCHDOG=m \
+    '# CONFIG_LOCALVERSION_AUTO is not set' \
+    '# CONFIG_WLAN is not set' \
+    '# CONFIG_BT is not set' \
+    '# CONFIG_RFKILL is not set'; do
     if ! grep -qx "${expected}" "${KERNEL_SRC_DIR}/.config"; then
       missing+=("${expected}")
     fi
   done
 
   if [[ "${#missing[@]}" -ne 0 ]]; then
-    echo "内核无线配置校验失败:"
+    echo "内核配置校验失败:"
     printf '  %s\n' "${missing[@]}"
+    exit 1
+  fi
+
+  for symbol in \
+    ACPI PCI KVM XEN COMPAT EFI NUMA HIBERNATION KEXEC KEXEC_FILE CRASH_DUMP \
+    MEMORY_HOTPLUG MEMORY_HOTREMOVE \
+    ARCH_ACTIONS ARCH_AIROHA ARCH_ALPINE ARCH_APPLE ARCH_ARTPEC ARCH_AXIADO \
+    ARCH_BCM ARCH_BERLIN ARCH_BLAIZE ARCH_BST ARCH_CIX ARCH_EXYNOS \
+    ARCH_SPARX5 ARCH_K3 ARCH_LG1K ARCH_HISI ARCH_KEEMBAY ARCH_MEDIATEK \
+    ARCH_MESON ARCH_MICROCHIP ARCH_MVEBU ARCH_NXP ARCH_MA35 ARCH_NPCM \
+    ARCH_QCOM ARCH_REALTEK ARCH_RENESAS ARCH_ROCKCHIP ARCH_SEATTLE \
+    ARCH_INTEL_SOCFPGA ARCH_SOPHGO ARCH_STM32 ARCH_SYNQUACER ARCH_TEGRA \
+    ARCH_TESLA_FSD ARCH_SPRD ARCH_THUNDER ARCH_THUNDER2 ARCH_UNIPHIER \
+    ARCH_VEXPRESS ARCH_VISCONTI ARCH_XGENE ARCH_ZYNQMP \
+    WLAN BT RFKILL NETFILTER CAN NFC WWAN ATA RC_CORE MEDIA_SUPPORT DRM \
+    SOUND STAGING I2C SPI MTD RD_GZIP RD_BZIP2 RD_LZMA RD_XZ RD_LZO RD_LZ4 \
+    NET_9P VIRTIO_BLK VIRTIO_NET VIRTIO_CONSOLE HW_RANDOM_VIRTIO VIRTIO_MMIO \
+    BLK_DEV_NBD MD BLK_DEV_DM GNSS IPMI_HANDLER TCG_TPM SPMI; do
+    if grep -Eq "^CONFIG_${symbol}=(y|m)$" "${KERNEL_SRC_DIR}/.config"; then
+      enabled+=("CONFIG_${symbol}")
+    fi
+  done
+
+  if [[ "${#enabled[@]}" -ne 0 ]]; then
+    echo "发现未关闭的无用内核子系统:"
+    printf '  %s\n' "${enabled[@]}"
     exit 1
   fi
 }
@@ -682,23 +505,18 @@ build_kernel() {
   apply_kernel_patches
   # 内核补丁会让源码树变为 dirty；写入空 .scmversion 避免版本名追加 -dirty
   : > "${KERNEL_SRC_DIR}/.scmversion"
-  if make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- "${KERNEL_DEFCONFIG}" >/dev/null 2>&1; then
-    log "使用内核配置: ${KERNEL_DEFCONFIG}"
-  else
-    log "内核不支持 ${KERNEL_DEFCONFIG}，回退到 defconfig"
-    make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
-  fi
+  make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- "${KERNEL_DEFCONFIG}"
+  log "使用内核配置: ${KERNEL_DEFCONFIG}"
 
-  if [[ -x "${KERNEL_SRC_DIR}/scripts/config" ]]; then
-    log "启用额外的内核功能"
-    "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_SRC_DIR}/.config" \
+  log "配置 H616 Zero 2 专用内核功能"
+  "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_SRC_DIR}/.config" \
       --enable BLK_DEV_INITRD \
-      --enable RD_GZIP \
-      --enable RD_BZIP2 \
-      --enable RD_LZMA \
-      --enable RD_XZ \
-      --enable RD_LZO \
-      --enable RD_LZ4 \
+      --disable RD_GZIP \
+      --disable RD_BZIP2 \
+      --disable RD_LZMA \
+      --disable RD_XZ \
+      --disable RD_LZO \
+      --disable RD_LZ4 \
       --enable RD_ZSTD \
       --enable BTRFS_FS \
       --enable BTRFS_FS_POSIX_ACL \
@@ -706,111 +524,128 @@ build_kernel() {
       --module ZRAM \
       --enable USB \
       --enable USB_SUPPORT \
-      --enable USB_XHCI_HCD \
       --enable USB_EHCI_HCD \
       --enable USB_OHCI_HCD \
       --enable USB_STORAGE \
       --enable USB_MUSB_HDRC \
       --enable USB_MUSB_SUNXI \
       --enable PHY_SUN4I_USB \
-      --disable MICROSEMI_PHY \
-      --disable USB_XHCI_RCAR \
-      --disable USB_XHCI_TEGRA \
       --enable EXTCON \
-      --enable EXTCON_USB_GPIO \
-      --enable WLAN \
-      --module CFG80211 \
-      --enable CFG80211_WEXT \
-      --module MAC80211 \
-      --enable RFKILL \
+      --disable USB_XHCI_HCD \
+      --disable ACPI \
+      --disable PCI \
+      --disable KVM \
+      --disable XEN \
+      --disable COMPAT \
+      --disable EFI \
+      --disable NUMA \
+      --disable HIBERNATION \
+      --disable KEXEC \
+      --disable KEXEC_FILE \
+      --disable CRASH_DUMP \
+      --disable MEMORY_HOTPLUG \
+      --disable MEMORY_HOTREMOVE \
+      --disable ARCH_ACTIONS \
+      --disable ARCH_AIROHA \
+      --disable ARCH_ALPINE \
+      --disable ARCH_APPLE \
+      --disable ARCH_ARTPEC \
+      --disable ARCH_AXIADO \
+      --disable ARCH_BCM \
+      --disable ARCH_BERLIN \
+      --disable ARCH_BLAIZE \
+      --disable ARCH_BST \
+      --disable ARCH_CIX \
+      --disable ARCH_EXYNOS \
+      --disable ARCH_SPARX5 \
+      --disable ARCH_K3 \
+      --disable ARCH_LG1K \
+      --disable ARCH_HISI \
+      --disable ARCH_KEEMBAY \
+      --disable ARCH_MEDIATEK \
+      --disable ARCH_MESON \
+      --disable ARCH_MICROCHIP \
+      --disable ARCH_MVEBU \
+      --disable ARCH_NXP \
+      --disable ARCH_MA35 \
+      --disable ARCH_NPCM \
+      --disable ARCH_QCOM \
+      --disable ARCH_REALTEK \
+      --disable ARCH_RENESAS \
+      --disable ARCH_ROCKCHIP \
+      --disable ARCH_SEATTLE \
+      --disable ARCH_INTEL_SOCFPGA \
+      --disable ARCH_SOPHGO \
+      --disable ARCH_STM32 \
+      --disable ARCH_SYNQUACER \
+      --disable ARCH_TEGRA \
+      --disable ARCH_TESLA_FSD \
+      --disable ARCH_SPRD \
+      --disable ARCH_THUNDER \
+      --disable ARCH_THUNDER2 \
+      --disable ARCH_UNIPHIER \
+      --disable ARCH_VEXPRESS \
+      --disable ARCH_VISCONTI \
+      --disable ARCH_XGENE \
+      --disable ARCH_ZYNQMP \
+      --disable WLAN \
+      --disable BT \
+      --disable RFKILL \
+      --disable NETFILTER \
+      --disable CAN \
+      --disable NFC \
+      --disable WWAN \
+      --disable ATA \
+      --disable RC_CORE \
+      --disable MEDIA_SUPPORT \
+      --disable DRM \
+      --disable SOUND \
+      --disable STAGING \
+      --disable I2C \
+      --disable SPI \
+      --disable MTD \
+      --disable NET_9P \
+      --disable VIRTIO_BLK \
+      --disable VIRTIO_NET \
+      --disable VIRTIO_CONSOLE \
+      --disable HW_RANDOM_VIRTIO \
+      --disable VIRTIO_MMIO \
+      --disable BLK_DEV_NBD \
+      --disable MD \
+      --disable BLK_DEV_DM \
+      --disable GNSS \
+      --disable IPMI_HANDLER \
+      --disable TCG_TPM \
+      --disable SPMI \
       --enable NVMEM \
       --enable NVMEM_SUNXI_SID \
-      --enable SPARD_WLAN_SUPPORT \
-      --module WLAN_UWE5622 \
-      --module SPRDWL_NG \
-      --enable UNISOC_WIFI_PS \
-      --module TTY_OVERY_SDIO \
-      --module SUNXI_ADDR_MGT \
-      --disable RTL8XXXU \
-      --disable RTW88 \
-      --disable RTW88_8822B \
-      --disable RTW88_8822BS \
-      --disable RTW88_8822C \
-      --disable RTW88_8822CS \
-      --disable RTW89 \
-      --disable RTW89_8852A \
-      --disable RTW89_8852AE \
+      --enable MFD_AXP20X_RSB \
+      --enable REGULATOR_FIXED_VOLTAGE \
+      --enable REGULATOR_AXP20X \
+      --enable CPU_FREQ \
+      --enable CPUFREQ_DT \
+      --module ARM_ALLWINNER_SUN50I_CPUFREQ_NVMEM \
       --enable THERMAL \
       --enable CPU_THERMAL \
       --enable THERMAL_GOV_STEP_WISE \
-      --enable THERMAL_GOV_USER_SPACE \
-      --enable THERMAL_EMULATION \
       --enable SUN8I_THERMAL \
-      --module REGULATOR_SY8106A \
-      --module I2C_MV64XXX \
-      --module SPI_SUN6I \
       --enable MMC \
       --enable MMC_SUNXI \
       --enable STMMAC_ETH \
+      --enable STMMAC_PLATFORM \
       --enable DWMAC_SUN8I \
-      --enable NETFILTER \
-      --enable NETFILTER_ADVANCED \
-      --enable NETFILTER_NETLINK \
-      --module NETFILTER_NETLINK_LOG \
-      --module NETFILTER_NETLINK_QUEUE \
-      --module NF_CONNTRACK \
-      --module NF_CT_NETLINK \
-      --module NF_NAT \
-      --enable NF_TABLES \
-      --enable NF_TABLES_INET \
-      --enable NF_TABLES_NETDEV \
-      --enable NF_TABLES_ARP \
-      --module NFT_NUMGEN \
-      --module NFT_CT \
-      --module NFT_LOG \
-      --module NFT_LIMIT \
-      --module NFT_MASQ \
-      --module NFT_REDIR \
-      --module NFT_NAT \
-      --module NFT_QUEUE \
-      --module NFT_QUOTA \
-      --module NFT_REJECT \
-      --module NFT_COMPAT \
-      --module NFT_HASH \
-      --module NFT_FIB_INET \
-      --module NFT_DUP_IPV4 \
-      --module NFT_FIB_IPV4 \
-      --module NFT_DUP_IPV6 \
-      --module NFT_FIB_IPV6 \
-      --module NETFILTER_XTABLES \
-      --module IP_NF_IPTABLES \
-      --module IP_NF_NAT \
-      --module IP_NF_TARGET_MASQUERADE \
-      --module IP_NF_TARGET_REDIRECT \
-      --module IP_NF_TARGET_REJECT \
-      --module IP_NF_RAW \
-      --module IP6_NF_IPTABLES \
-      --module IP6_NF_NAT \
-      --module IP6_NF_TARGET_MASQUERADE \
-      --module IP6_NF_TARGET_REJECT \
-      --module IP6_NF_RAW \
+      --enable SERIAL_8250_DW \
+      --enable RTC_DRV_SUN6I \
+      --enable LEDS_GPIO \
+      --enable LEDS_TRIGGER_HEARTBEAT \
+      --enable LEDS_TRIGGER_DEFAULT_ON \
+      --module DMA_SUN6I \
+      --module SUNXI_WATCHDOG \
       --set-str LOCALVERSION "" \
       --disable LOCALVERSION_AUTO
-  fi
 
   make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
   assert_kernel_config
-
-  # 再次校验，确保不会带上 -dirty 后缀
-  if grep -q '^CONFIG_LOCALVERSION_AUTO=y' "${KERNEL_SRC_DIR}/.config"; then
-    log "强制关闭 CONFIG_LOCALVERSION_AUTO（避免 -dirty 后缀）"
-    if [[ -x "${KERNEL_SRC_DIR}/scripts/config" ]]; then
-      "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_SRC_DIR}/.config" \
-        --set-str LOCALVERSION "" \
-        --disable LOCALVERSION_AUTO
-      make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-    fi
-  fi
 
   make -C "${KERNEL_SRC_DIR}" -j"${JOBS}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= Image modules dtbs
 
@@ -1034,22 +869,6 @@ WantedBy=multi-user.target
 SERVICE
 }
 
-install_uwe5622_rootfs() {
-  log "安装 UWE5622 WiFi 固件和模块加载配置"
-  mkdir -p "${MNT_ROOT}/lib/firmware/uwe5622" "${MNT_ROOT}/etc/modules-load.d"
-  cp -a "${FIRMWARE_ASSETS_DIR}/wcnmodem.bin" \
-    "${FIRMWARE_ASSETS_DIR}/wcnmodem-38222.bin" \
-    "${FIRMWARE_ASSETS_DIR}/wifi_2355b001_1ant.ini" \
-    "${MNT_ROOT}/lib/firmware/uwe5622/"
-  ln -sfn uwe5622/wcnmodem.bin "${MNT_ROOT}/lib/firmware/wcnmodem.bin"
-  ln -sfn uwe5622/wifi_2355b001_1ant.ini "${MNT_ROOT}/lib/firmware/wifi_2355b001_1ant.ini"
-  cat <<'EOF2' > "${MNT_ROOT}/etc/modules-load.d/uwe5622-wifi.conf"
-sunxi_addr
-uwe5622_bsp_sdio
-sprdwl_ng
-EOF2
-}
-
 configure_rootfs_in_chroot() {
   log "配置 rootfs"
   cat <<EOF2 > "${MNT_ROOT}/etc/hostname"
@@ -1064,15 +883,14 @@ ff02::2 ip6-allrouters
 EOF2
 
   cat <<EOF2 > "${MNT_ROOT}/etc/apt/sources.list"
-deb ${MIRROR} ${SUITE} main contrib non-free non-free-firmware
-deb ${MIRROR}-security ${SUITE}-security main contrib non-free non-free-firmware
-deb ${MIRROR} ${SUITE}-updates main contrib non-free non-free-firmware
+deb ${MIRROR} ${SUITE} main
+deb ${MIRROR}-security ${SUITE}-security main
+deb ${MIRROR} ${SUITE}-updates main
 EOF2
 
   chroot "${MNT_ROOT}" /bin/bash -c "apt-get update"
-  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends debian-archive-keyring openssh-server network-manager wpasupplicant wireless-regdb rfkill ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils zstd xz-utils locales"
+  chroot "${MNT_ROOT}" /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends debian-archive-keyring openssh-server network-manager ca-certificates systemd-timesyncd btrfs-progs initramfs-tools parted cloud-guest-utils zstd xz-utils locales"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl enable ssh NetworkManager systemd-timesyncd"
-  install_uwe5622_rootfs
   
   # 确保 NetworkManager 管理所有网络接口
   cat <<'EOF2' > "${MNT_ROOT}/etc/NetworkManager/conf.d/10-globally-managed-devices.conf"
@@ -1271,14 +1089,6 @@ install_compiled_kernel() {
   make -C "${KERNEL_SRC_DIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
     INSTALL_MOD_PATH="${MNT_ROOT}" DEPMOD=/bin/true modules_install
 
-  local required_module
-  for required_module in sunxi_addr uwe5622_bsp_sdio sprdwl_ng; do
-    if ! find "${MNT_ROOT}/lib/modules/${KERNEL_RELEASE}" -name "${required_module}.ko*" -print -quit | grep -q .; then
-      echo "缺少 UWE5622 内核模块: ${required_module}"
-      exit 1
-    fi
-  done
-
   cp "${ASSETS_DIR}/${ASSET_KERNEL_NAME}" "${MNT_BOOT}/${ASSET_KERNEL_NAME}"
   mkdir -p "${MNT_BOOT}/dtb"
   rsync -a "${ASSETS_DIR}/dtb/" "${MNT_BOOT}/dtb/"
@@ -1298,16 +1108,11 @@ install_compiled_kernel() {
     exit 1
   fi
   
-  # 精简内核模块（在安装后）
-  log "精简内核模块"
+  # 配置已经在编译前关闭不需要的子系统，这里只重建模块依赖。
+  log "重建模块依赖"
   if [[ -d "${MNT_ROOT}/lib/modules/${KERNEL_RELEASE}" ]]; then
-    chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules/${KERNEL_RELEASE} -name '*.ko' -path '*/kernel/sound/*' -delete" || true
-    chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules/${KERNEL_RELEASE} -name '*.ko' -path '*/kernel/drivers/gpu/*' -delete" || true
-    chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules/${KERNEL_RELEASE} -name '*.ko' -path '*/kernel/drivers/media/*' -delete" || true
-    chroot "${MNT_ROOT}" /bin/bash -c "find /lib/modules/${KERNEL_RELEASE} -name '*.ko' -path '*/kernel/drivers/staging/*' -delete" || true
-    
     # 重新生成模块依赖
-    chroot "${MNT_ROOT}" /bin/bash -c "depmod -a '${KERNEL_RELEASE}'" || true
+    chroot "${MNT_ROOT}" /bin/bash -c "depmod -a '${KERNEL_RELEASE}'"
   fi
 
   rm -f "${MNT_ROOT}/usr/bin/qemu-aarch64-static"
@@ -1352,16 +1157,13 @@ create_update_bundle() {
   UPDATE_BUNDLE_OUTPUT="${output_dir}/${bundle_name}.tar.xz"
 
   rm -rf "${bundle_dir}" "${UPDATE_BUNDLE_OUTPUT}"
-  mkdir -p "${payload_dir}/boot/dtb" "${payload_dir}/lib/modules" \
-    "${payload_dir}/lib/firmware/uwe5622" "${payload_dir}/etc/modules-load.d"
+  mkdir -p "${payload_dir}/boot/dtb" "${payload_dir}/lib/modules"
 
   cp "${MNT_BOOT}/${ASSET_KERNEL_NAME}" "${payload_dir}/boot/${ASSET_KERNEL_NAME}"
   cp "${MNT_BOOT}/${ASSET_INITRD_NAME}" "${payload_dir}/boot/${ASSET_INITRD_NAME}"
   cp "${MNT_BOOT}/config-${KERNEL_RELEASE}" "${payload_dir}/boot/config-${KERNEL_RELEASE}"
   cp "${MNT_BOOT}/dtb/sun50i-h616-orangepi-zero2.dtb" "${payload_dir}/boot/dtb/"
   cp -a "${MNT_ROOT}/lib/modules/${KERNEL_RELEASE}" "${payload_dir}/lib/modules/"
-  cp -a "${MNT_ROOT}/lib/firmware/uwe5622/." "${payload_dir}/lib/firmware/uwe5622/"
-  cp "${MNT_ROOT}/etc/modules-load.d/uwe5622-wifi.conf" "${payload_dir}/etc/modules-load.d/"
 
   cat <<EOF2 > "${bundle_dir}/manifest.txt"
 Orange Pi Zero 2 kernel update bundle
@@ -1371,12 +1173,9 @@ Kernel image:   /boot/${ASSET_KERNEL_NAME}
 Initrd image:   /boot/${ASSET_INITRD_NAME}
 Device tree:    /boot/dtb/sun50i-h616-orangepi-zero2.dtb
 Modules:        /lib/modules/${KERNEL_RELEASE}
-Firmware:       /lib/firmware/uwe5622/
-Module config:  /etc/modules-load.d/uwe5622-wifi.conf
 
-The target system also needs the Debian packages wpasupplicant, wireless-regdb,
-and rfkill. New images install them automatically; install them manually before
-using this bundle on an older rootfs.
+This build intentionally excludes WiFi, Bluetooth, GPU, sound and media
+drivers. The update bundle only replaces the kernel, DTB, initrd and modules.
 
 Install:
   sudo ./install.sh
@@ -1422,10 +1221,6 @@ ensure_payload() {
     "${PAYLOAD_DIR}/boot/config-${KERNEL_RELEASE}"
     "${PAYLOAD_DIR}/boot/dtb/${DTB_IMAGE}"
     "${PAYLOAD_DIR}/lib/modules/${KERNEL_RELEASE}"
-    "${PAYLOAD_DIR}/lib/firmware/uwe5622/wcnmodem.bin"
-    "${PAYLOAD_DIR}/lib/firmware/uwe5622/wcnmodem-38222.bin"
-    "${PAYLOAD_DIR}/lib/firmware/uwe5622/wifi_2355b001_1ant.ini"
-    "${PAYLOAD_DIR}/etc/modules-load.d/uwe5622-wifi.conf"
   )
 
   for path in "${paths[@]}"; do
@@ -1438,26 +1233,6 @@ ensure_payload() {
     echo "更新包不完整，缺少:"
     printf '  %s\n' "${missing[@]}"
     exit 1
-  fi
-}
-
-warn_missing_wireless_userspace() {
-  local missing=()
-
-  if ! command -v wpa_supplicant >/dev/null 2>&1; then
-    missing+=(wpasupplicant)
-  fi
-  if ! command -v rfkill >/dev/null 2>&1; then
-    missing+=(rfkill)
-  fi
-  if command -v dpkg-query >/dev/null 2>&1 && \
-     ! dpkg-query -W -f='${db:Status-Abbrev}' wireless-regdb 2>/dev/null | grep -q '^ii'; then
-    missing+=(wireless-regdb)
-  fi
-
-  if [[ "${#missing[@]}" -ne 0 ]]; then
-    log "警告: 系统缺少 WiFi 用户态组件: ${missing[*]}"
-    log "联网后安装: apt-get update && apt-get install -y ${missing[*]}"
   fi
 }
 
@@ -1491,10 +1266,6 @@ backup_current_boot() {
   backup_file "/boot/config-${KERNEL_RELEASE}"
   backup_file "/boot/dtb/${DTB_IMAGE}"
   backup_file /boot/extlinux/extlinux.conf
-  backup_file /lib/firmware/uwe5622
-  backup_file /lib/firmware/wcnmodem.bin
-  backup_file /lib/firmware/wifi_2355b001_1ant.ini
-  backup_file /etc/modules-load.d/uwe5622-wifi.conf
 }
 
 archive_file() {
@@ -1554,15 +1325,6 @@ install_boot_files() {
   install -m 0644 "${PAYLOAD_DIR}/boot/${INITRD_IMAGE}" "/boot/${INITRD_IMAGE}"
   install -m 0644 "${PAYLOAD_DIR}/boot/config-${KERNEL_RELEASE}" "/boot/config-${KERNEL_RELEASE}"
   install -m 0644 "${PAYLOAD_DIR}/boot/dtb/${DTB_IMAGE}" "/boot/dtb/${DTB_IMAGE}"
-}
-
-install_wireless_files() {
-  log "安装 UWE5622 固件和模块加载配置"
-  mkdir -p /lib/firmware/uwe5622 /etc/modules-load.d
-  cp -a "${PAYLOAD_DIR}/lib/firmware/uwe5622/." /lib/firmware/uwe5622/
-  ln -sfn uwe5622/wcnmodem.bin /lib/firmware/wcnmodem.bin
-  ln -sfn uwe5622/wifi_2355b001_1ant.ini /lib/firmware/wifi_2355b001_1ant.ini
-  install -m 0644 "${PAYLOAD_DIR}/etc/modules-load.d/uwe5622-wifi.conf" /etc/modules-load.d/uwe5622-wifi.conf
 }
 
 update_extlinux() {
@@ -1724,12 +1486,10 @@ pack_backup_archive() {
 main() {
   require_root
   ensure_payload
-  warn_missing_wireless_userspace
   ensure_boot_mounted
   backup_current_boot
   install_modules
   install_boot_files
-  install_wireless_files
   update_extlinux
   archive_old_boot_versions
   pack_backup_archive
