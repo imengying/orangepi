@@ -120,6 +120,9 @@ sudo reboot
 
 脚本支持通过环境变量或命令行参数自定义构建，**命令行参数优先级更高**：
 
+主机名可通过 `IMAGE_HOSTNAME` 环境变量或 `--hostname` 参数设置，例如
+`IMAGE_HOSTNAME=orangepi ./build.sh`。脚本不会读取构建主机自身的 `HOSTNAME`，避免 CI Runner 名称写入镜像。
+
 | 参数 | 说明 | 默认值 |
 |---|---|---|
 | `--image-size` | 镜像文件大小 | `3G` |

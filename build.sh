@@ -6,7 +6,9 @@ SCRIPT_NAME=$(basename "$0")
 IMAGE_SIZE="${IMAGE_SIZE:-3G}"
 SUITE="${SUITE:-trixie}"
 ARCH="${ARCH:-arm64}"
-HOSTNAME="${HOSTNAME:-orangepi}"
+# Do not inherit the runner/host HOSTNAME; CI runners commonly expose a random
+# hostname which would otherwise be written into the target image.
+HOSTNAME="${IMAGE_HOSTNAME:-orangepi}"
 MIRROR="${MIRROR:-http://mirrors.ustc.edu.cn/debian}"
 OUTPUT="${OUTPUT:-$(pwd)/orangepi-zero2-debian13-trixie-btrfs.img}"
 COMPRESS="${COMPRESS:-xz}"
@@ -510,6 +512,89 @@ patch_vendor_warning_sources() {
   fi
 }
 
+patch_wifi_pwrseq() {
+  local pwrseq_file="${KERNEL_SRC_DIR}/drivers/mmc/core/pwrseq_simple.c"
+
+  if [[ ! -f "${pwrseq_file}" ]]; then
+    echo "缺少 MMC 简单电源时序驱动源码: ${pwrseq_file}"
+    exit 1
+  fi
+  if grep -Fq 'H616 uses a GPIO reset, not a reset-controller line.' "${pwrseq_file}"; then
+    return
+  fi
+  if ! grep -Fq 'devm_reset_control_get_optional_shared' "${pwrseq_file}"; then
+    echo "当前内核的 pwrseq_simple.c 未找到预期 reset controller 路径"
+    exit 1
+  fi
+
+  # Linux 7.1 tries a reset-controller lookup for a single reset-gpios entry.
+  # H616 uses a GPIO reset, so -ENOENT must fall through to gpiod instead of
+  # preventing wifi-pwrseq from registering and crashing the vendor driver.
+  perl -0pi -e 's/\tpwrseq->reset_ctrl = devm_reset_control_get_optional_shared\(dev, NULL\);\n\t\tif \(IS_ERR\(pwrseq->reset_ctrl\)\)\n\t\t\treturn dev_err_probe\(dev, PTR_ERR\(pwrseq->reset_ctrl\),\n\t\t\t\t\t     "reset control not ready\\n"\);/\tpwrseq->reset_ctrl = devm_reset_control_get_optional_shared(dev, NULL);\n\t\tif (IS_ERR(pwrseq->reset_ctrl)) {\n\t\t\tif (PTR_ERR(pwrseq->reset_ctrl) != -ENOENT)\n\t\t\t\treturn dev_err_probe(dev, PTR_ERR(pwrseq->reset_ctrl),\n\t\t\t\t\t     "reset control not ready\\n");\n\t\t\t\/\* H616 uses a GPIO reset, not a reset-controller line. *\/\n\t\t\tpwrseq->reset_ctrl = NULL;\n\t\t}/' "${pwrseq_file}"
+
+  if ! grep -Fq 'H616 uses a GPIO reset, not a reset-controller line.' "${pwrseq_file}"; then
+    echo "wifi-pwrseq GPIO 回退修补失败"
+    exit 1
+  fi
+}
+
+patch_uwe_initialization() {
+  local procfs_file="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622/unisocwcn/platform/wcn_procfs.c"
+  local procfs_header="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622/unisocwcn/platform/wcn_procfs.h"
+  local boot_file="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622/unisocwcn/platform/wcn_boot.c"
+  local wifi_file="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622/unisocwifi/wl_core.c"
+
+  for source_file in "${procfs_file}" "${procfs_header}" "${boot_file}" "${wifi_file}"; do
+    if [[ ! -f "${source_file}" ]]; then
+      echo "UWE5622 初始化源码缺失: ${source_file}"
+      exit 1
+    fi
+  done
+
+  # The vendor BSP can expose the Wi-Fi platform device before its procfs
+  # state is ready.  Return deferred-probe instead of dereferencing NULL.
+  if ! grep -Fq 'return mdbg_proc ? mdbg_proc->fail_count : -EPROBE_DEFER;' "${procfs_file}"; then
+    if ! grep -Fq '#include <linux/errno.h>' "${procfs_file}"; then
+      sed -i '/^#include <linux\/of.h>$/i #include <linux/errno.h>' "${procfs_file}"
+    fi
+    perl -0pi -e 's/int get_loopcheck_status\(void\)\n\{\n\treturn mdbg_proc->fail_count;\n\}/int get_loopcheck_status(void)\n{\n\treturn mdbg_proc ? mdbg_proc->fail_count : -EPROBE_DEFER;\n}/' "${procfs_file}"
+  fi
+  if ! grep -Fq 'return mdbg_proc ? mdbg_proc->fail_count : -EPROBE_DEFER;' "${procfs_file}"; then
+    echo "UWE5622 loopcheck 空指针修补失败"
+    exit 1
+  fi
+
+  local wakeup_guard=$'void wakeup_loopcheck_int(void)\n{\n\tif (mdbg_proc)\n\t\twake_up_interruptible(&mdbg_proc->loopcheck.rxwait);\n}'
+  if ! grep -Fq "${wakeup_guard}" "${procfs_file}"; then
+    perl -0pi -e 's/void wakeup_loopcheck_int\(void\)\n\{\n\twake_up_interruptible\(&mdbg_proc->loopcheck\.rxwait\);\n\}/void wakeup_loopcheck_int(void)\n{\n\tif (mdbg_proc)\n\t\twake_up_interruptible(\&mdbg_proc->loopcheck.rxwait);\n}/' "${procfs_file}"
+  fi
+  if ! grep -Fq "${wakeup_guard}" "${procfs_file}"; then
+    echo "UWE5622 loopcheck 唤醒保护修补失败"
+    exit 1
+  fi
+
+  # Preserve -EPROBE_DEFER through start_marlin() and sprdwl_probe(); the
+  # platform core can then retry Wi-Fi after the BSP procfs has initialized.
+  if ! grep -Fq 'int loopcheck_status;' "${boot_file}"; then
+    perl -0pi -e 's/int start_marlin\(u32 subsys\)\n\{/int start_marlin(u32 subsys)\n{\n\tint loopcheck_status;/' "${boot_file}"
+  fi
+  if ! grep -Fq 'loopcheck_status = get_loopcheck_status();' "${boot_file}"; then
+    perl -0pi -e 's/\tif \(get_loopcheck_status\(\)\) \{\n\t\tWCN_ERR\("%s loopcheck status is fail\\n", __func__\);\n\t\treturn -1;\n\t\}/\tloopcheck_status = get_loopcheck_status();\n\tif (loopcheck_status == -EPROBE_DEFER) {\n\t\tWCN_ERR("%s loopcheck state is not ready\\n", __func__);\n\t\treturn -EPROBE_DEFER;\n\t}\n\tif (loopcheck_status) {\n\t\tWCN_ERR("%s loopcheck status is fail\\n", __func__);\n\t\treturn -1;\n\t\}/' "${boot_file}"
+  fi
+  if ! grep -Fq 'loopcheck state is not ready' "${boot_file}"; then
+    echo "UWE5622 BSP deferred-probe 修补失败"
+    exit 1
+  fi
+
+  if ! grep -Fq 'ret = start_marlin(MARLIN_WIFI);' "${wifi_file}"; then
+    perl -0pi -e 's/\tif \(start_marlin\(MARLIN_WIFI\)\) \{\n\t\twl_err\("%s power on chipset failed\\n", __func__\);\n\t\treturn -ENODEV;\n\t\}/\tret = start_marlin(MARLIN_WIFI);\n\tif (ret) {\n\t\twl_err("%s power on chipset failed: %d\\n", __func__, ret);\n\t\treturn ret == -EPROBE_DEFER ? ret : -ENODEV;\n\t\}/' "${wifi_file}"
+  fi
+  if ! grep -Fq 'return ret == -EPROBE_DEFER ? ret : -ENODEV;' "${wifi_file}"; then
+    echo "UWE5622 WiFi deferred-probe 修补失败"
+    exit 1
+  fi
+}
+
 apply_kernel_patches() {
   local patch_file
   local wireless_dir="${KERNEL_SRC_DIR}/drivers/net/wireless/uwe5622"
@@ -556,6 +641,8 @@ apply_kernel_patches() {
       "${KERNEL_SRC_DIR}/drivers/net/wireless/Makefile"
   fi
 
+  patch_wifi_pwrseq
+  patch_uwe_initialization
   patch_vendor_warning_sources
 }
 
@@ -958,6 +1045,7 @@ install_uwe5622_rootfs() {
   ln -sfn uwe5622/wifi_2355b001_1ant.ini "${MNT_ROOT}/lib/firmware/wifi_2355b001_1ant.ini"
   cat <<'EOF2' > "${MNT_ROOT}/etc/modules-load.d/uwe5622-wifi.conf"
 sunxi_addr
+uwe5622_bsp_sdio
 sprdwl_ng
 EOF2
 }
