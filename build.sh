@@ -347,9 +347,6 @@ fetch_armbian_inputs() {
   fetch_verified_file "${patch_base}/arm64-dts-sun50i-h616-orangepi-zero2-enable-usb1-vbus.patch" \
     "6ed73c3d69c43e3c7d8fe9f4601f8a5418a0dfd17ad376bc72edb6428ed95eb9" \
     "${VENDOR_INPUTS_DIR}/01-enable-usb1-vbus.patch"
-  fetch_verified_file "${patch_base}/arm64-dts-sun50i-h616-orangepi-zero2-fix-led-functions.patch" \
-    "a40156ed2247b7a0ebc4410f6c749884da789e675121467fba1a044447a33bc5" \
-    "${VENDOR_INPUTS_DIR}/02-fix-led-functions.patch"
   fetch_verified_file "${patch_base}/drv-nvmem-sunxi-add-h616-support.patch" \
     "a2ae77146f78c43cc5727b2cdf428ab9703789abd11e2383e5f55ea290958ad4" \
     "${VENDOR_INPUTS_DIR}/06-add-h616-sid-support.patch"
@@ -405,17 +402,39 @@ build_uboot() {
   cp "${uboot_bin}" "${ASSETS_DIR}/uboot.bin"
 }
 
+apply_green_heartbeat_led_scheme() {
+  local led_file="${KERNEL_SRC_DIR}/arch/arm64/boot/dts/allwinner/sun50i-h616-orangepi-zero.dtsi"
+
+  if [[ ! -f "${led_file}" ]]; then
+    echo "缺少 Orange Pi Zero 2/3 LED 设备树: ${led_file}"
+    exit 1
+  fi
+
+  # Linux running state: PC12 red off, PC13 green heartbeat.
+  perl -0pi -e 's{(gpios = <&pio 2 12 GPIO_ACTIVE_HIGH>; /\* PC12 \*/\n\s*)default-state = "on";}{${1}default-state = "off";}s' "${led_file}"
+  perl -0pi -e 's{(gpios = <&pio 2 13 GPIO_ACTIVE_HIGH>; /\* PC13 \*/\n)}{${1}\t\t\tlinux,default-trigger = "heartbeat";\n}s' "${led_file}"
+
+  if ! grep -A1 -F 'gpios = <&pio 2 12 GPIO_ACTIVE_HIGH>; /* PC12 */' "${led_file}" | grep -Fq 'default-state = "off"'; then
+    echo "LED 方案修补失败: 红灯 PC12 未设置为 off"
+    exit 1
+  fi
+  if ! grep -A1 -F 'gpios = <&pio 2 13 GPIO_ACTIVE_HIGH>; /* PC13 */' "${led_file}" | grep -Fq 'linux,default-trigger = "heartbeat"'; then
+    echo "LED 方案修补失败: 绿灯 PC13 未设置为 heartbeat"
+    exit 1
+  fi
+}
+
 apply_kernel_patches() {
   local patch_file
 
-  log "应用 Armbian Zero 2 7.1 板级补丁"
+  log "应用 Orange Pi Zero 2 7.1 板级补丁"
   for patch_file in \
     01-enable-usb1-vbus.patch \
-    02-fix-led-functions.patch \
     06-add-h616-sid-support.patch; do
     git -C "${KERNEL_SRC_DIR}" apply --check --whitespace=nowarn "${VENDOR_INPUTS_DIR}/${patch_file}"
     git -C "${KERNEL_SRC_DIR}" apply --whitespace=nowarn "${VENDOR_INPUTS_DIR}/${patch_file}"
   done
+  apply_green_heartbeat_led_scheme
 }
 
 assert_kernel_config() {
@@ -454,13 +473,14 @@ assert_kernel_config() {
     CONFIG_RTC_DRV_SUN6I=y \
     CONFIG_LEDS_GPIO=y \
     CONFIG_LEDS_TRIGGER_HEARTBEAT=y \
-    CONFIG_LEDS_TRIGGER_DEFAULT_ON=y \
     CONFIG_DMA_SUN6I=m \
     CONFIG_SUNXI_WATCHDOG=m \
     '# CONFIG_LOCALVERSION_AUTO is not set' \
     '# CONFIG_WLAN is not set' \
     '# CONFIG_BT is not set' \
-    '# CONFIG_RFKILL is not set'; do
+    '# CONFIG_RFKILL is not set' \
+    '# CONFIG_CFG80211 is not set' \
+    '# CONFIG_MAC80211 is not set'; do
     if ! grep -qx "${expected}" "${KERNEL_SRC_DIR}/.config"; then
       missing+=("${expected}")
     fi
@@ -486,7 +506,36 @@ assert_kernel_config() {
     WLAN BT RFKILL NETFILTER CAN NFC WWAN ATA RC_CORE MEDIA_SUPPORT DRM \
     SOUND STAGING I2C SPI MTD RD_GZIP RD_BZIP2 RD_LZMA RD_XZ RD_LZO RD_LZ4 \
     NET_9P VIRTIO_BLK VIRTIO_NET VIRTIO_CONSOLE HW_RANDOM_VIRTIO VIRTIO_MMIO \
-    BLK_DEV_NBD MD BLK_DEV_DM GNSS IPMI_HANDLER TCG_TPM SPMI; do
+    BLK_DEV_NBD MD BLK_DEV_DM GNSS IPMI_HANDLER TCG_TPM SPMI \
+    CFG80211 MAC80211 CFG80211_WEXT WEXT_CORE WEXT_PROC WEXT_SPY WEXT_PRIV \
+    BRIDGE NET_DSA VLAN_8021Q NET_SCHED NET_CLS_ACT HSR QRTR MACVLAN MACVTAP \
+    TUN VETH USB_NET_DRIVERS USB_SERIAL TYPEC UCSI USB_CDNS3 \
+    SCSI_UFSHCD POWER_SEQUENCING CHROME_PLATFORMS CROS_EC RPMSG SLIMBUS GREYBUS \
+    CORESIGHT FPGA IIO PERF_EVENTS COUNTER MUX_CORE STM STM_PROTO_BASIC \
+    STM_PROTO_SYS_T PWM HWMON \
+    REGULATOR_PWM LEDS_PWM COMMON_CLK_PWM LEDS_TRIGGER_DEFAULT_ON \
+    BACKLIGHT_CLASS_DEVICE FUSE_FS OVERLAY_FS PSTORE \
+    MHI_BUS MHI_NET GPIO_AGGREGATOR GPIO_WCD934X GPIO_ALTERA GPIO_XILINX \
+    LEDS_CLASS_FLASH LEDS_CLASS_MULTICOLOR LEDS_CROS_EC \
+    COMMON_CLK_XLNX_CLKWZRD XILINX_VCU \
+    BCM_SBA_RAID XILINX_DMA XILINX_ZYNQMP_DMA XILINX_ZYNQMP_DPDMA \
+    REGULATOR_VCTRL REGMAP_SLIMBUS UACCE XILINX_SDFEC MFD_WCD934X RAID_ATTRS \
+    USB_ONBOARD_DEV USB_ACM KEYBOARD_ADC KEYBOARD_GPIO_POLLED \
+    INPUT_PWM_BEEPER INPUT_PWM_VIBRA INPUT_FF_MEMLESS INPUT_SPARSEKMAP \
+    RTC_DRV_MT6397 RTC_DRV_ZYNQMP NVMEM_REBOOT_MODE GENERIC_ADC_THERMAL \
+    XILINX_WATCHDOG XILINX_WINDOW_WATCHDOG CPU_FREQ_GOV_POWERSAVE \
+    CPU_FREQ_GOV_CONSERVATIVE GOOGLE_FIRMWARE DEVFREQ_GOV_PASSIVE \
+    NVMEM_LAYOUT_SL28_VPD NVMEM_RMEM \
+    PHY_CADENCE_TORRENT PHY_CADENCE_DPHY PHY_CADENCE_DPHY_RX \
+    PHY_CADENCE_SIERRA PHY_CADENCE_SALVO PHY_QCOM_USB_HS \
+    PHY_CAN_TRANSCEIVER PHY_SUN6I_MIPI_DPHY \
+    AX88796B_PHY AQUANTIA_PHY BCM54140_PHY BCM7XXX_PHY BROADCOM_PHY \
+    DP83867_PHY DP83869_PHY DP83TG720_PHY DP83TD510_PHY MARVELL_PHY \
+    MARVELL_10G_PHY MARVELL_88Q2XXX_PHY MICREL_PHY MICROSEMI_PHY \
+    AT803X_PHY QCA808X_PHY ROCKCHIP_PHY SMSC_PHY VITESSE_PHY \
+    XILINX_GMII2RGMII NET_VENDOR_BROADCOM NET_VENDOR_QUALCOMM NET_VENDOR_XILINX \
+    DWMAC_SUNXI DWMAC_SUN55I DWMAC_GENERIC INPUT_TOUCHSCREEN INPUT_MISC \
+    KEYBOARD_GPIO HID_MULTITOUCH; do
     if grep -Eq "^CONFIG_${symbol}=(y|m)$" "${KERNEL_SRC_DIR}/.config"; then
       enabled+=("CONFIG_${symbol}")
     fi
@@ -591,7 +640,30 @@ build_kernel() {
       --disable WLAN \
       --disable BT \
       --disable RFKILL \
+      --disable CFG80211 \
+      --disable MAC80211 \
+      --disable CFG80211_WEXT \
+      --disable WEXT_CORE \
+      --disable WEXT_PROC \
+      --disable WEXT_SPY \
+      --disable WEXT_PRIV \
       --disable NETFILTER \
+      --disable BRIDGE \
+      --disable NET_DSA \
+      --disable VLAN_8021Q \
+      --disable NET_SCHED \
+      --disable NET_CLS_ACT \
+      --disable HSR \
+      --disable QRTR \
+      --disable MACVLAN \
+      --disable MACVTAP \
+      --disable TUN \
+      --disable VETH \
+      --disable USB_NET_DRIVERS \
+      --disable USB_SERIAL \
+      --disable TYPEC \
+      --disable UCSI \
+      --disable USB_CDNS3 \
       --disable CAN \
       --disable NFC \
       --disable WWAN \
@@ -617,6 +689,112 @@ build_kernel() {
       --disable IPMI_HANDLER \
       --disable TCG_TPM \
       --disable SPMI \
+      --disable SCSI_UFSHCD \
+      --disable POWER_SEQUENCING \
+      --disable CHROME_PLATFORMS \
+      --disable CROS_EC \
+      --disable RPMSG \
+      --disable SLIMBUS \
+      --disable GREYBUS \
+      --disable CORESIGHT \
+      --disable FPGA \
+      --disable IIO \
+      --disable PERF_EVENTS \
+      --disable COUNTER \
+      --disable MUX_CORE \
+      --disable STM \
+      --disable STM_PROTO_BASIC \
+      --disable STM_PROTO_SYS_T \
+      --disable PWM \
+      --disable HWMON \
+      --disable REGULATOR_PWM \
+      --disable LEDS_PWM \
+      --disable COMMON_CLK_PWM \
+      --disable MHI_BUS \
+      --disable MHI_NET \
+      --disable GPIO_AGGREGATOR \
+      --disable GPIO_WCD934X \
+      --disable GPIO_ALTERA \
+      --disable GPIO_XILINX \
+      --disable LEDS_CLASS_FLASH \
+      --disable LEDS_CLASS_MULTICOLOR \
+      --disable LEDS_CROS_EC \
+      --disable LEDS_TRIGGER_DEFAULT_ON \
+      --disable COMMON_CLK_XLNX_CLKWZRD \
+      --disable XILINX_VCU \
+      --disable BCM_SBA_RAID \
+      --disable XILINX_DMA \
+      --disable XILINX_ZYNQMP_DMA \
+      --disable XILINX_ZYNQMP_DPDMA \
+      --disable REGULATOR_VCTRL \
+      --disable REGMAP_SLIMBUS \
+      --disable UACCE \
+      --disable XILINX_SDFEC \
+      --disable MFD_WCD934X \
+      --disable RAID_ATTRS \
+      --disable USB_ONBOARD_DEV \
+      --disable USB_ACM \
+      --disable KEYBOARD_ADC \
+      --disable KEYBOARD_GPIO_POLLED \
+      --disable INPUT_PWM_BEEPER \
+      --disable INPUT_PWM_VIBRA \
+      --disable INPUT_FF_MEMLESS \
+      --disable INPUT_SPARSEKMAP \
+      --disable RTC_DRV_MT6397 \
+      --disable RTC_DRV_ZYNQMP \
+      --disable NVMEM_REBOOT_MODE \
+      --disable GENERIC_ADC_THERMAL \
+      --disable XILINX_WATCHDOG \
+      --disable XILINX_WINDOW_WATCHDOG \
+      --disable CPU_FREQ_GOV_POWERSAVE \
+      --disable CPU_FREQ_GOV_CONSERVATIVE \
+      --disable GOOGLE_FIRMWARE \
+      --disable DEVFREQ_GOV_PASSIVE \
+      --disable NVMEM_LAYOUT_SL28_VPD \
+      --disable NVMEM_RMEM \
+      --disable BACKLIGHT_CLASS_DEVICE \
+      --disable FUSE_FS \
+      --disable OVERLAY_FS \
+      --disable PSTORE \
+      --disable PHY_CADENCE_TORRENT \
+      --disable PHY_CADENCE_DPHY \
+      --disable PHY_CADENCE_DPHY_RX \
+      --disable PHY_CADENCE_SIERRA \
+      --disable PHY_CADENCE_SALVO \
+      --disable PHY_QCOM_USB_HS \
+      --disable PHY_CAN_TRANSCEIVER \
+      --disable PHY_SUN6I_MIPI_DPHY \
+      --disable AX88796B_PHY \
+      --disable AQUANTIA_PHY \
+      --disable BCM54140_PHY \
+      --disable BCM7XXX_PHY \
+      --disable BROADCOM_PHY \
+      --disable DP83867_PHY \
+      --disable DP83869_PHY \
+      --disable DP83TG720_PHY \
+      --disable DP83TD510_PHY \
+      --disable MARVELL_PHY \
+      --disable MARVELL_10G_PHY \
+      --disable MARVELL_88Q2XXX_PHY \
+      --disable MICREL_PHY \
+      --disable MICROSEMI_PHY \
+      --disable AT803X_PHY \
+      --disable QCA808X_PHY \
+      --disable ROCKCHIP_PHY \
+      --disable SMSC_PHY \
+      --disable VITESSE_PHY \
+      --disable XILINX_GMII2RGMII \
+      --disable NET_VENDOR_BROADCOM \
+      --disable NET_VENDOR_QUALCOMM \
+      --disable NET_VENDOR_XILINX \
+      --disable DWMAC_SUNXI \
+      --disable DWMAC_SUN55I \
+      --disable DWMAC_GENERIC \
+      --disable INPUT_TOUCHSCREEN \
+      --disable INPUT_MISC \
+      --disable KEYBOARD_GPIO \
+      --disable HID_MULTITOUCH \
+      --enable REALTEK_PHY \
       --enable NVMEM \
       --enable NVMEM_SUNXI_SID \
       --enable MFD_AXP20X_RSB \
@@ -638,7 +816,6 @@ build_kernel() {
       --enable RTC_DRV_SUN6I \
       --enable LEDS_GPIO \
       --enable LEDS_TRIGGER_HEARTBEAT \
-      --enable LEDS_TRIGGER_DEFAULT_ON \
       --module DMA_SUN6I \
       --module SUNXI_WATCHDOG \
       --set-str LOCALVERSION "" \
@@ -899,7 +1076,7 @@ unmanaged-devices=none
 EOF2
 
   # 配置 end0 自动连接
-  cat <<'EOF2' > "${MNT_ROOT}/etc/NetworkManager/system-connections/Wired-end0.nmconnection"
+  cat <<EOF2 > "${MNT_ROOT}/etc/NetworkManager/system-connections/Wired-end0.nmconnection"
 [connection]
 id=Wired-end0
 type=ethernet
@@ -911,9 +1088,13 @@ autoconnect-priority=999
 
 [ipv4]
 method=auto
+dhcp-send-hostname=true
+dhcp-hostname=${HOSTNAME}
+dhcp-client-id=mac
 
 [ipv6]
 method=auto
+dhcp-send-hostname=true
 EOF2
   chmod 600 "${MNT_ROOT}/etc/NetworkManager/system-connections/Wired-end0.nmconnection"
   
@@ -925,7 +1106,7 @@ EOF2
   log "禁用不必要的服务"
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl mask getty@tty1.service" || true
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable apt-daily.timer apt-daily-upgrade.timer" || true
-  chroot "${MNT_ROOT}" /bin/bash -c "if systemctl cat man-db.timer >/dev/null 2>&1; then systemctl disable man-db.timer; fi" || true
+  chroot "${MNT_ROOT}" /bin/bash -c "if systemctl is-enabled man-db.timer >/dev/null 2>&1; then systemctl disable man-db.timer >/dev/null 2>&1 || true; fi" || true
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable e2scrub_all.timer" || true
   chroot "${MNT_ROOT}" /bin/bash -c "systemctl disable fstrim.timer" || true
   

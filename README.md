@@ -18,7 +18,7 @@
 - **ZRAM 内存压缩**：默认启用 `lz4` 算法，优化小内存设备性能
 - **有线网络**：NetworkManager 管理 `end0`，默认通过 DHCP 即插即用
 - **精简硬件支持**：不集成 WiFi、蓝牙、GPU、音频及媒体驱动
-- **LED 状态指示**：红灯心跳、绿灯常亮，由内核设备树直接定义
+- **LED 状态指示**：进入 Linux 后绿灯 heartbeat 闪烁、红灯熄灭，由内核设备树直接定义
 
 ---
 
@@ -176,7 +176,7 @@ nmcli connection up Wired-end0
 
 ### 其他
 
-- **LED 状态灯**：红灯心跳，绿灯常亮
+- **LED 状态灯**：进入 Linux 后绿灯（PC13）按 heartbeat 闪烁、红灯（PC12）熄灭；U-Boot 启动阶段的灯态可能不同
 - **ZRAM**：默认启用，`lz4` 算法，内存上限 40%，配置文件 `/etc/default/zramswap`
 
 ---
@@ -190,6 +190,8 @@ nmcli connection up Wired-end0
 - UWE5622 固件、`wpasupplicant`、`wireless-regdb` 和 `rfkill`
 - Mali GPU、DRM、ALSA、V4L2、红外、NFC、CAN、WWAN 及 staging 驱动
 - 非 Allwinner ARM64 平台、PCI/ACPI/KVM/Xen、VirtIO、SPI-NOR 和普通 I²C
+- 网络桥接、DSA/VLAN、USB 网卡、MHI、Type-C/UCSI 及非 RTL8211 PHY
+- UFS、ChromeOS/Google 固件、RPMsg、Greybus、FPGA、IIO、性能追踪和其它 SoC 专用外设
 - 32 位用户态兼容及非 ZSTD initramfs 解压格式
 
 ---
