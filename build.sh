@@ -478,9 +478,7 @@ assert_kernel_config() {
     '# CONFIG_LOCALVERSION_AUTO is not set' \
     '# CONFIG_WLAN is not set' \
     '# CONFIG_BT is not set' \
-    '# CONFIG_RFKILL is not set' \
-    '# CONFIG_CFG80211 is not set' \
-    '# CONFIG_MAC80211 is not set'; do
+    '# CONFIG_RFKILL is not set'; do
     if ! grep -qx "${expected}" "${KERNEL_SRC_DIR}/.config"; then
       missing+=("${expected}")
     fi
@@ -510,7 +508,10 @@ assert_kernel_config() {
     CFG80211 MAC80211 CFG80211_WEXT WEXT_CORE WEXT_PROC WEXT_SPY WEXT_PRIV \
     BRIDGE NET_DSA VLAN_8021Q NET_SCHED NET_CLS_ACT HSR QRTR MACVLAN MACVTAP \
     TUN VETH USB_NET_DRIVERS USB_SERIAL TYPEC UCSI USB_CDNS3 \
-    SCSI_UFSHCD POWER_SEQUENCING CHROME_PLATFORMS CROS_EC RPMSG SLIMBUS GREYBUS \
+    SCSI_UFSHCD POWER_SEQUENCING CHROME_PLATFORMS CROS_EC REMOTEPROC \
+    RPMSG RPMSG_CHAR RPMSG_CTRL RPMSG_NS RPMSG_QCOM_GLINK \
+    RPMSG_QCOM_GLINK_RPM RPMSG_QCOM_GLINK_SMEM RPMSG_QCOM_SMD RPMSG_VIRTIO \
+    VIRTIO VIRTIO_BALLOON SLIMBUS GREYBUS \
     CORESIGHT FPGA IIO PERF_EVENTS COUNTER MUX_CORE STM STM_PROTO_BASIC \
     STM_PROTO_SYS_T PWM HWMON \
     REGULATOR_PWM LEDS_PWM COMMON_CLK_PWM LEDS_TRIGGER_DEFAULT_ON \
@@ -693,7 +694,18 @@ build_kernel() {
       --disable POWER_SEQUENCING \
       --disable CHROME_PLATFORMS \
       --disable CROS_EC \
+      --disable REMOTEPROC \
       --disable RPMSG \
+      --disable RPMSG_CHAR \
+      --disable RPMSG_CTRL \
+      --disable RPMSG_NS \
+      --disable RPMSG_QCOM_GLINK \
+      --disable RPMSG_QCOM_GLINK_RPM \
+      --disable RPMSG_QCOM_GLINK_SMEM \
+      --disable RPMSG_QCOM_SMD \
+      --disable RPMSG_VIRTIO \
+      --disable VIRTIO \
+      --disable VIRTIO_BALLOON \
       --disable SLIMBUS \
       --disable GREYBUS \
       --disable CORESIGHT \
